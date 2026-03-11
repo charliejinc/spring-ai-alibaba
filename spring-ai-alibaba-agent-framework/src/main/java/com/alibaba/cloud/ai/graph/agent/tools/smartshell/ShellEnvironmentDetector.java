@@ -149,6 +149,7 @@ public class ShellEnvironmentDetector {
 					.type(ShellEnvironment.Type.POWERSHELL)
 					.executablePath(path)
 					.command(List.of(path))
+					.environment(System.getenv())
 					.available(true)
 					.priority(PRIORITY_POWERSHELL)
 					.build();
@@ -165,6 +166,7 @@ public class ShellEnvironmentDetector {
 				.type(ShellEnvironment.Type.CMD)
 				.executablePath(cmdPath)
 				.command(List.of(cmdPath))
+				.environment(System.getenv())
 				.available(true)
 				.priority(PRIORITY_CMD)
 				.build();
@@ -191,6 +193,7 @@ public class ShellEnvironmentDetector {
 					.type(ShellEnvironment.Type.WSL)
 					.executablePath("wsl")
 					.command(List.of("wsl", "bash"))
+					.environment(System.getenv())
 					.available(true)
 					.priority(PRIORITY_WSL)
 					.build();
@@ -217,6 +220,7 @@ public class ShellEnvironmentDetector {
 					.type(ShellEnvironment.Type.GIT_BASH)
 					.executablePath(expandedPath)
 					.command(List.of(expandedPath, "--login", "-i"))
+					.environment(System.getenv())
 					.available(true)
 					.priority(PRIORITY_GIT_BASH)
 					.build();
@@ -240,6 +244,7 @@ public class ShellEnvironmentDetector {
 					.type(ShellEnvironment.Type.BASH)
 					.executablePath(path)
 					.command(List.of(path))
+					.environment(System.getenv())
 					.available(true)
 					.priority(PRIORITY_BASH)
 					.build();
@@ -263,6 +268,7 @@ public class ShellEnvironmentDetector {
 					.type(ShellEnvironment.Type.ZSH)
 					.executablePath(path)
 					.command(List.of(path))
+					.environment(System.getenv())
 					.available(true)
 					.priority(PRIORITY_ZSH)
 					.build();
@@ -284,6 +290,7 @@ public class ShellEnvironmentDetector {
 					.type(ShellEnvironment.Type.SH)
 					.executablePath(path)
 					.command(List.of(path))
+					.environment(System.getenv())
 					.available(true)
 					.priority(PRIORITY_SH)
 					.build();
@@ -321,6 +328,7 @@ public class ShellEnvironmentDetector {
 				.type(ShellEnvironment.Type.CMD)
 				.executablePath("cmd.exe")
 				.command(List.of("cmd.exe", "/c"))
+				.environment(System.getenv())
 				.available(true)
 				.priority(0)
 				.build();
@@ -329,6 +337,7 @@ public class ShellEnvironmentDetector {
 				.type(ShellEnvironment.Type.SH)
 				.executablePath("/bin/sh")
 				.command(List.of("/bin/sh"))
+				.environment(System.getenv())
 				.available(true)
 				.priority(0)
 				.build();
