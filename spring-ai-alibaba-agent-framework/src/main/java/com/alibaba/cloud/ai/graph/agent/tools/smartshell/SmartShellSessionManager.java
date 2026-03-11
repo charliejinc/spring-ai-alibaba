@@ -268,6 +268,7 @@ public class SmartShellSessionManager {
 
 	/**
 	 * Check if a command exists in the current shell.
+	 * Uses both shell session and direct system check for robustness.
 	 */
 	public boolean commandExists(String command, RunnableConfig config) {
 		SmartShellSession session = (SmartShellSession) config.context().get(SESSION_INSTANCE_CONTEXT_KEY);
@@ -275,9 +276,41 @@ public class SmartShellSessionManager {
 			return false;
 		}
 
-		String checkCommand = session.getCurrentShell().getCheckCommand(command.split("\\s+")[0]);
+		// First try via shell session (may have PATH issues)
+		String baseCommand = command.split("\\s+")[0];
+		String checkCommand = session.getCurrentShell().getCheckCommand(baseCommand);
 		CommandResult result = session.execute(checkCommand, 10000, 10, null, null, null);
-		return result.isSuccess();
+		if (result.isSuccess()) {
+			return true;
+		}
+
+		// Fallback: try direct system check (bypasses shell session PATH issues)
+		log.debug("Shell session check failed for '{}', trying direct system check", baseCommand);
+		return commandExistsDirect(baseCommand);
+	}
+
+	/**
+	 * Directly check if a command exists in system PATH.
+	 * Uses Java's ProcessBuilder which inherits environment from current process.
+	 */
+	private boolean commandExistsDirect(String command) {
+		String os = System.getProperty("os.name").toLowerCase();
+		try {
+			ProcessBuilder pb;
+			if (os.contains("windows")) {
+				// Use cmd /c where - more reliable than PowerShell Get-Command
+				pb = new ProcessBuilder("cmd", "/c", "where", command);
+			} else {
+				pb = new ProcessBuilder("which", command);
+			}
+			pb.redirectErrorStream(true);
+			Process process = pb.start();
+			boolean finished = process.waitFor(3, java.util.concurrent.TimeUnit.SECONDS);
+			return finished && process.exitValue() == 0;
+		} catch (Exception e) {
+			log.debug("Direct command check failed for '{}': {}", command, e.getMessage());
+			return false;
+		}
 	}
 
 	/**

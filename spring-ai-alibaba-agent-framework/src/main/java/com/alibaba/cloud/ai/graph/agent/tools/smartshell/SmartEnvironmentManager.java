@@ -24,6 +24,8 @@ import java.util.*;
 /**
  * Manages command environment - detects missing commands and auto-installs them.
  * This is the core "intelligence" that allows SmartShellTool to self-heal.
+ *
+ * <p>Supports cross-platform: Windows (PowerShell/cmd), macOS (zsh/bash), Linux (bash/zsh)</p>
  */
 public class SmartEnvironmentManager {
 
@@ -32,12 +34,33 @@ public class SmartEnvironmentManager {
 	private final ShellExecutor executor;
 	private final boolean autoInstall;
 	private final Map<String, InstallationStrategy> installationStrategies;
+	private final Platform platform;
 
 	public SmartEnvironmentManager(ShellExecutor executor, boolean autoInstall) {
 		this.executor = executor;
 		this.autoInstall = autoInstall;
+		this.platform = detectPlatform();
 		this.installationStrategies = new HashMap<>();
 		initializeStrategies();
+		log.info("SmartEnvironmentManager initialized for platform: {}", platform);
+	}
+
+	/**
+	 * Detect current platform.
+	 */
+	private Platform detectPlatform() {
+		String osName = System.getProperty("os.name").toLowerCase();
+		if (osName.contains("windows")) {
+			return Platform.WINDOWS;
+		} else if (osName.contains("mac")) {
+			return Platform.MAC;
+		} else {
+			return Platform.LINUX;
+		}
+	}
+
+	public enum Platform {
+		WINDOWS, MAC, LINUX
 	}
 
 	/**
@@ -79,9 +102,12 @@ public class SmartEnvironmentManager {
 			return CommandStatus.missing(command, executor.getInstallSuggestion(command));
 		}
 
-		log.info("Attempting to install '{}' using strategy: {}", command, strategy.getName());
+		log.info("Attempting to install '{}' using strategy: {} on {}", command, strategy.getName(), platform);
 
-		for (String installCmd : strategy.getInstallCommands()) {
+		// Get platform-specific installation commands
+		List<String> installCommands = strategy.getInstallCommandsForPlatform(platform);
+
+		for (String installCmd : installCommands) {
 			log.info("Running install command: {}", installCmd);
 			ShellExecutor.ExecutionResult result = executor.execute(installCmd, config, 120000);
 
@@ -237,13 +263,61 @@ public class SmartEnvironmentManager {
 		public List<String> getInstallCommands() { return installCommands; }
 		public String getDescription() { return description; }
 
+		/**
+		 * Get installation commands sorted by platform preference.
+		 * Platform order: current platform first, then others.
+		 */
+		public List<String> getInstallCommandsForPlatform(Platform currentPlatform) {
+			if (installCommands.isEmpty()) {
+				return Collections.emptyList();
+			}
+
+			// If only one command, return as-is
+			if (installCommands.size() == 1) {
+				return installCommands;
+			}
+
+			// Try to find platform-specific command first
+			String platformPrefix = switch (currentPlatform) {
+				case WINDOWS -> "powershell";
+				case MAC -> "brew";
+				case LINUX -> "sudo apt-get";
+			};
+
+			// Find commands that start with platform-specific prefix
+			List<String> prioritized = new ArrayList<>();
+			List<String> others = new ArrayList<>();
+
+			for (String cmd : installCommands) {
+				if (cmd.trim().startsWith(platformPrefix) || cmd.contains(platformPrefix)) {
+					prioritized.add(cmd);
+				} else {
+					others.add(cmd);
+				}
+			}
+
+			// Add prioritized commands first, then others
+			List<String> result = new ArrayList<>(prioritized);
+			result.addAll(others);
+
+			// If no platform-specific command found, just return original
+			return result.isEmpty() ? installCommands : result;
+		}
+
 		// Predefined strategies
 
 		public static InstallationStrategy python() {
 			return new InstallationStrategy("python",
 				Arrays.asList(
+					// Mac
+					"brew install python3",
+					// Linux
+					"sudo apt-get update && sudo apt-get install -y python3 python3-pip",
+					// Windows via WSL
 					"wsl sudo apt-get update && wsl sudo apt-get install -y python3 python3-pip",
+					// Windows via PowerShell
 					"powershell -Command \"winget install -e --id Python.Python.3.11 --accept-package-agreements --accept-source-agreements\"",
+					// Windows via Chocolatey
 					"choco install python -y"
 				),
 				"Install Python and pip");
@@ -262,8 +336,15 @@ public class SmartEnvironmentManager {
 		public static InstallationStrategy nodeJs() {
 			return new InstallationStrategy("nodejs",
 				Arrays.asList(
-					"wsl curl -fsSL https://deb.nodesource.com/setup_lts.x | wsl bash - && wsl sudo apt-get install -y nodejs",
+					// Mac
+					"brew install node",
+					// Linux
+					"sudo apt-get update && sudo apt-get install -y nodejs npm",
+					// Windows via WSL (fallback)
+					"wsl sudo apt-get update && wsl sudo apt-get install -y nodejs npm",
+					// Windows via PowerShell
 					"powershell -Command \"winget install -e --id OpenJS.NodeJS --accept-package-agreements --accept-source-agreements\"",
+					// Windows via Chocolatey
 					"choco install nodejs -y"
 				),
 				"Install Node.js and npm");
@@ -272,8 +353,15 @@ public class SmartEnvironmentManager {
 		public static InstallationStrategy java() {
 			return new InstallationStrategy("java",
 				Arrays.asList(
+					// Mac
+					"brew install openjdk@17 && brew install maven",
+					// Linux
+					"sudo apt-get update && sudo apt-get install -y default-jdk maven",
+					// Windows via WSL
 					"wsl sudo apt-get update && wsl sudo apt-get install -y default-jdk maven",
+					// Windows via PowerShell
 					"powershell -Command \"winget install -e --id EclipseAdoptium.Temurin.17.JDK --accept-package-agreements\"",
+					// Windows via Chocolatey
 					"choco install openjdk maven -y"
 				),
 				"Install Java JDK and Maven");
@@ -282,8 +370,15 @@ public class SmartEnvironmentManager {
 		public static InstallationStrategy git() {
 			return new InstallationStrategy("git",
 				Arrays.asList(
+					// Mac
+					"brew install git",
+					// Linux
+					"sudo apt-get update && sudo apt-get install -y git",
+					// Windows via WSL
 					"wsl sudo apt-get update && wsl sudo apt-get install -y git",
+					// Windows via PowerShell
 					"powershell -Command \"winget install -e --id Git.Git --accept-package-agreements\"",
+					// Windows via Chocolatey
 					"choco install git -y"
 				),
 				"Install Git");

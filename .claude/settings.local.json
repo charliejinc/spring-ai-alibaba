@@ -9,7 +9,18 @@
       "Bash(powershell -Command \"try { Get-Command node -ErrorAction Stop | Out-Null } catch { exit 1 }; echo exit code: $LASTEXITCODE\")",
       "Bash(\"/c/Program Files/nodejs/node.exe\" --version 2>/dev/null || echo \"Git Bash node not found\")",
       "Bash(powershell -Command \"try { Get-Command nonexistentcmd123 -ErrorAction Stop | Out-Null } catch { exit 1 }; echo exit code: $LASTEXITCODE\")",
-      "Bash(powershell -Command \"Get-Command node -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source\")"
+      "Bash(powershell -Command \"Get-Command node -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source\")",
+      "Bash(powershell -Command \"try { Get-Command node -ErrorAction Stop | Out-Null } catch { exit 1 }; Write-Host ExitCode: $LASTEXITCODE\")",
+      "Bash(powershell -Command \"try { Get-Command node -ErrorAction Stop | Out-Null } catch { exit 1 }\"; echo \"Exit code: $?\")",
+      "Bash(powershell -Command \"try { Get-Command nonexistentcmd123 -ErrorAction Stop | Out-Null } catch { exit 1 }\"; echo \"Exit code: $?\")",
+      "Bash(cd D:/code2/spring-ai-alibaba && ./mvnw -pl :spring-ai-alibaba-agent-framework compile -q 2>&1 | head -20)",
+      "Bash(where python:*)",
+      "Bash(powershell -Command \"try { Get-Command python -ErrorAction Stop | Out-Null } catch { exit 1 }\"; echo \"Exit code: $?\")",
+      "Bash(cmd /c \"where python\")",
+      "Bash(\"/c/Users/jinch/AppData/Local/Microsoft/WindowsApps/python.exe\" --version 2>&1 || echo \"Python Windows Store shim - not real\")",
+      "Bash(powershell -Command \"Get-Command python* -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source\")",
+      "Bash(powershell -Command \"Get-ChildItem 'C:\\\\Python*' -ErrorAction SilentlyContinue; Get-ChildItem 'C:\\\\Program Files\\\\Python*' -ErrorAction SilentlyContinue; Get-ChildItem 'C:\\\\Users\\\\jinch\\\\Anaconda*' -ErrorAction SilentlyContinue\")",
+      "Bash(cd D:/code2/spring-ai-alibaba && ./mvnw -pl :spring-ai-alibaba-agent-framework -Dtest=SmartShellToolTest -q 2>&1 | head -20 || echo \"No tests yet, let's test via code\")"
     ]
   }
 }
