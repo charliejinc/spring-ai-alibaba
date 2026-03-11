@@ -108,10 +108,26 @@ public class ErrorRecoveryStrategy {
 				"3. Update dependencies: mvn dependency:resolve");
 		} else if (NETWORK_ERROR_PATTERN.matcher(output).find()) {
 			analysis.setType(ErrorType.NETWORK_ERROR);
-			analysis.setSuggestedFix("Network connectivity issue. Try:\n" +
-				"1. Check your internet connection\n" +
-				"2. Check proxy settings\n" +
-				"3. Retry the command");
+			// Check if it's an npm/npx/yarn/pnpm command and suggest mirror configuration
+			String lowerCommand = command.toLowerCase().trim();
+			boolean isNpmCommand = lowerCommand.startsWith("npm ") || lowerCommand.startsWith("npx ")
+					|| lowerCommand.startsWith("yarn ") || lowerCommand.startsWith("pnpm ");
+
+			if (isNpmCommand) {
+				analysis.setSuggestedFix(
+						"Network connectivity issue with npm/npx/yarn/pnpm. For China users, try configuring a mirror:\n" +
+								"1. Set npm mirror: npm config set registry https://registry.npmmirror.com\n" +
+								"2. Set npx mirror: npx config set registry https://registry.npmmirror.com\n" +
+								"3. Set yarn mirror: yarn config set registry https://registry.npmmirror.com\n" +
+								"4. Set pnpm mirror: pnpm config set registry https://registry.npmmirror.com\n\n" +
+								"Or reset to default:\n" +
+								"  npm config set registry https://registry.npmjs.org");
+			} else {
+				analysis.setSuggestedFix("Network connectivity issue. Try:\n" +
+						"1. Check your internet connection\n" +
+						"2. Check proxy settings\n" +
+						"3. Retry the command");
+			}
 		} else if (COMPILATION_ERROR_PATTERN.matcher(output).find()) {
 			analysis.setType(ErrorType.COMPILATION_ERROR);
 			analysis.setSuggestedFix("Compilation failed. Check the error output for specific issues.");
