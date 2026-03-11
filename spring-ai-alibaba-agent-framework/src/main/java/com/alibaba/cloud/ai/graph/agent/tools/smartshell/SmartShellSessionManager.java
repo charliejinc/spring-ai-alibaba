@@ -408,7 +408,13 @@ public class SmartShellSessionManager {
 		CommandResult execute(String command, long timeoutMs, int maxOutputLines, Long maxOutputBytes,
 							  String cwd, Map<String, String> env) {
 			if (activeSession == null || !activeSession.isAlive()) {
-				throw new IllegalStateException("Shell session is not running");
+				// Session is not running, try to restart it
+				log.warn("Shell session is not running, attempting to restart...");
+				try {
+					restart();
+				} catch (RuntimeException e) {
+					throw new IllegalStateException("Shell session is not running and failed to restart: " + e.getMessage());
+				}
 			}
 			return activeSession.execute(command, timeoutMs, maxOutputLines, maxOutputBytes, cwd, env);
 		}

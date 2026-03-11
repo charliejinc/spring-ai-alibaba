@@ -159,6 +159,22 @@ public class SmartShellTool {
 
 			log.info("Executing smart shell command (autoFix={}): {}", shouldAutoFix, command);
 
+			// Auto-detect Python and ensure it's available
+			if (autoInstall) {
+				Set<String> detectedCommands = detectRequiredCommands(command);
+				for (String cmd : detectedCommands) {
+					SmartEnvironmentManager.CommandStatus status = environmentManager.ensureCommandAvailable(cmd, config);
+					if (!status.isAvailable()) {
+						return SmartShellResult.error(
+								String.format("Command '%s' not available. %s", cmd, status.getMessage()),
+								status.getInstallSuggestion());
+					}
+					if (status.wasInstalled()) {
+						log.info("Auto-installed: {}", cmd);
+					}
+				}
+			}
+
 			// Ensure dependencies are available
 			if (autoInstall && parsed.requiredCommands != null && !parsed.requiredCommands.isEmpty()) {
 				for (String cmd : parsed.requiredCommands) {
@@ -1131,6 +1147,77 @@ public class SmartShellTool {
 			commands.add(parts[0]);
 		}
 		return commands;
+	}
+
+	/**
+	 * Auto-detect required commands based on the command being executed.
+	 * This analyzes the command string to determine what dependencies are needed.
+	 */
+	private Set<String> detectRequiredCommands(String command) {
+		Set<String> required = new HashSet<>();
+		if (command == null || command.isEmpty()) {
+			return required;
+		}
+
+		String lowerCommand = command.toLowerCase();
+
+		// Check for Python execution
+		if (lowerCommand.startsWith("python") || lowerCommand.startsWith("python3") ||
+			lowerCommand.contains("python ") || lowerCommand.contains("python3 ")) {
+			// Check if python is actually available
+			if (!sessionManager.commandExists("python", null) &&
+				!sessionManager.commandExists("python3", null)) {
+				required.add("python");
+			}
+		}
+
+		// Check for .py files in command
+		if (command.contains(".py")) {
+			if (!sessionManager.commandExists("python", null) &&
+				!sessionManager.commandExists("python3", null)) {
+				required.add("python");
+			}
+		}
+
+		// Check for pip commands
+		if (lowerCommand.startsWith("pip") || lowerCommand.startsWith("pip3") ||
+			lowerCommand.contains("pip ") || lowerCommand.contains("pip3 ")) {
+			if (!sessionManager.commandExists("pip", null) &&
+				!sessionManager.commandExists("pip3", null)) {
+				required.add("python");  // Install Python which includes pip
+			}
+		}
+
+		// Check for Node.js
+		if (lowerCommand.startsWith("node") || lowerCommand.contains("node ") ||
+			command.contains(".js") || command.contains("npm ") || command.contains("npx ")) {
+			if (!sessionManager.commandExists("node", null)) {
+				required.add("node");
+			}
+		}
+
+		// Check for Git
+		if (lowerCommand.startsWith("git ") || lowerCommand.contains(" git ")) {
+			if (!sessionManager.commandExists("git", null)) {
+				required.add("git");
+			}
+		}
+
+		// Check for Docker
+		if (lowerCommand.startsWith("docker") || lowerCommand.contains("docker ")) {
+			if (!sessionManager.commandExists("docker", null)) {
+				required.add("docker");
+			}
+		}
+
+		// Check for curl/wget (network tools)
+		if (lowerCommand.contains("curl ") || lowerCommand.contains("wget ")) {
+			if (!sessionManager.commandExists("curl", null)) {
+				required.add("curl");
+			}
+		}
+
+		return required;
 	}
 
 	private SmartShellResult formatResult(SmartShellSessionManager.SmartCommandResult result, String originalCommand) {
