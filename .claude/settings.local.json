@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd D:/code2/spring-ai-alibaba && ./mvnw -pl :spring-ai-alibaba-agent-framework compile -DskipTests -q 2>&1 | head -50)",
+      "Bash(cd D:/code2/spring-ai-alibaba && ./mvnw -pl :spring-ai-alibaba-agent-framework compile -q 2>&1 | head -30)",
+      "Bash(where node:*)",
+      "Bash(where npm:*)",
+      "Bash(powershell -Command \"try { Get-Command node -ErrorAction Stop | Out-Null } catch { exit 1 }\")",
+      "Bash(powershell -Command \"try { Get-Command node -ErrorAction Stop | Out-Null } catch { exit 1 }; echo exit code: $LASTEXITCODE\")",
+      "Bash(\"/c/Program Files/nodejs/node.exe\" --version 2>/dev/null || echo \"Git Bash node not found\")",
+      "Bash(powershell -Command \"try { Get-Command nonexistentcmd123 -ErrorAction Stop | Out-Null } catch { exit 1 }; echo exit code: $LASTEXITCODE\")",
+      "Bash(powershell -Command \"Get-Command node -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source\")"
+    ]
+  }
+}

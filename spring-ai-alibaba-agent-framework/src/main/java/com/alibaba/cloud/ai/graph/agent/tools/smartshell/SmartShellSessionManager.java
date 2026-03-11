@@ -107,7 +107,7 @@ public class SmartShellSessionManager {
 
 			// Run startup commands
 			for (String command : startupCommands) {
-				CommandResult result = session.execute(command, startupTimeout, maxOutputLines, maxOutputBytes);
+				CommandResult result = session.execute(command, startupTimeout, maxOutputLines, maxOutputBytes, null, null);
 				if (result.isTimedOut() || (result.getExitCode() != null && result.getExitCode() != 0)) {
 					log.warn("Startup command failed: {}, exit code: {}", command, result.getExitCode());
 					// Don't throw - let the session continue
@@ -129,7 +129,7 @@ public class SmartShellSessionManager {
 				// Run shutdown commands
 				for (String command : shutdownCommands) {
 					try {
-						session.execute(command, commandTimeout, maxOutputLines, maxOutputBytes);
+						session.execute(command, commandTimeout, maxOutputLines, maxOutputBytes, null, null);
 					} catch (Exception e) {
 						log.warn("Shutdown command failed: {}", command, e);
 					}
@@ -162,22 +162,40 @@ public class SmartShellSessionManager {
 	 * Execute a command with automatic error detection and optional recovery.
 	 */
 	public SmartCommandResult executeCommand(String command, RunnableConfig config) {
-		return executeCommand(command, config, autoFixEnabled);
+		return executeCommand(command, config, autoFixEnabled, null, null, commandTimeout);
 	}
 
 	/**
 	 * Execute a command with optional auto-fix.
 	 */
 	public SmartCommandResult executeCommand(String command, RunnableConfig config, boolean attemptAutoFix) {
+		return executeCommand(command, config, attemptAutoFix, null, null, commandTimeout);
+	}
+
+	/**
+	 * Execute a command with full control over execution parameters.
+	 *
+	 * @param command the command to execute
+	 * @param config the runnable configuration
+	 * @param attemptAutoFix whether to attempt auto-fix on failure
+	 * @param cwd temporary working directory (null to use session default)
+	 * @param env temporary environment variables (null to use session default)
+	 * @param timeoutMs timeout in milliseconds (0 or negative to use default)
+	 * @return the smart command result
+	 */
+	public SmartCommandResult executeCommand(String command, RunnableConfig config, boolean attemptAutoFix,
+										   String cwd, Map<String, String> env, long timeoutMs) {
 		SmartShellSession session = (SmartShellSession) config.context().get(SESSION_INSTANCE_CONTEXT_KEY);
 		if (session == null) {
 			throw new IllegalStateException("Shell session not initialized. Call initialize() first.");
 		}
 
-		log.info("Executing command: {}", command);
+		long effectiveTimeout = timeoutMs > 0 ? timeoutMs : commandTimeout;
 
-		// Execute the command
-		CommandResult result = session.execute(command, commandTimeout, maxOutputLines, maxOutputBytes);
+		log.info("Executing command: {} (cwd={}, timeout={}ms)", command, cwd != null ? cwd : "default", effectiveTimeout);
+
+		// Execute the command with cwd and env
+		CommandResult result = session.execute(command, effectiveTimeout, maxOutputLines, maxOutputBytes, cwd, env);
 
 		// Analyze the result
 		ErrorRecoveryStrategy analyzer = new ErrorRecoveryStrategy(session.getCurrentShell());
@@ -193,12 +211,12 @@ public class SmartShellSessionManager {
 				log.info("Attempting auto-fix for command: {}", command);
 
 				// Try the fix
-				CommandResult fixResult = session.execute(suggestion.getAutoFixCommand(), commandTimeout, maxOutputLines, maxOutputBytes);
+				CommandResult fixResult = session.execute(suggestion.getAutoFixCommand(), commandTimeout, maxOutputLines, maxOutputBytes, null, null);
 
 				if (fixResult.isSuccess()) {
 					// Retry the original command
 					log.info("Auto-fix successful, retrying original command");
-					result = session.execute(command, commandTimeout, maxOutputLines, maxOutputBytes);
+					result = session.execute(command, commandTimeout, maxOutputLines, maxOutputBytes, null, null);
 
 					// Re-analyze
 					analysis = analyzer.analyze(command, result.getOutput(), result.getExitCode());
@@ -212,7 +230,7 @@ public class SmartShellSessionManager {
 		// If still failed and we have alternative shells, try them
 		if (!smartResult.isSuccess() && tryAlternativeShells && session.hasAlternativeShells()) {
 			log.info("Trying alternative shells for failed command");
-			SmartCommandResult alternativeResult = tryAlternativeShells(command, session, analysis);
+			SmartCommandResult alternativeResult = tryAlternativeShells(command, session, analysis, cwd, env, timeoutMs);
 			if (alternativeResult != null && alternativeResult.isSuccess()) {
 				return alternativeResult;
 			}
@@ -225,12 +243,14 @@ public class SmartShellSessionManager {
 	 * Try the command in alternative shells.
 	 */
 	private SmartCommandResult tryAlternativeShells(String command, SmartShellSession session,
-												ErrorRecoveryStrategy.ErrorAnalysis analysis) {
+												ErrorRecoveryStrategy.ErrorAnalysis analysis,
+												String cwd, Map<String, String> env, long timeoutMs) {
 		List<String> alternatives = analysis.getAlternativeCommands();
+		long effectiveTimeout = timeoutMs > 0 ? timeoutMs : commandTimeout;
 
 		for (String alternative : alternatives) {
 			log.info("Trying alternative command: {}", alternative);
-			CommandResult result = session.executeInNewShell(alternative, commandTimeout, maxOutputLines, maxOutputBytes);
+			CommandResult result = session.executeInNewShell(alternative, effectiveTimeout, maxOutputLines, maxOutputBytes, cwd, env);
 
 			if (result.isSuccess()) {
 				log.info("Alternative command succeeded");
@@ -256,7 +276,7 @@ public class SmartShellSessionManager {
 		}
 
 		String checkCommand = session.getCurrentShell().getCheckCommand(command.split("\\s+")[0]);
-		CommandResult result = session.execute(checkCommand, 10000, 10, null);
+		CommandResult result = session.execute(checkCommand, 10000, 10, null, null, null);
 		return result.isSuccess();
 	}
 
@@ -274,7 +294,7 @@ public class SmartShellSessionManager {
 
 		// Re-run startup commands
 		for (String command : startupCommands) {
-			session.execute(command, startupTimeout, maxOutputLines, maxOutputBytes);
+			session.execute(command, startupTimeout, maxOutputLines, maxOutputBytes, null, null);
 		}
 	}
 
@@ -352,19 +372,21 @@ public class SmartShellSessionManager {
 			}
 		}
 
-		CommandResult execute(String command, long timeoutMs, int maxOutputLines, Long maxOutputBytes) {
+		CommandResult execute(String command, long timeoutMs, int maxOutputLines, Long maxOutputBytes,
+							  String cwd, Map<String, String> env) {
 			if (activeSession == null || !activeSession.isAlive()) {
 				throw new IllegalStateException("Shell session is not running");
 			}
-			return activeSession.execute(command, timeoutMs, maxOutputLines, maxOutputBytes);
+			return activeSession.execute(command, timeoutMs, maxOutputLines, maxOutputBytes, cwd, env);
 		}
 
-		CommandResult executeInNewShell(String command, long timeoutMs, int maxOutputLines, Long maxOutputBytes) {
+		CommandResult executeInNewShell(String command, long timeoutMs, int maxOutputLines, Long maxOutputBytes,
+										String cwd, Map<String, String> env) {
 			// Create a temporary session for this command
 			try {
 				ShellSession tempSession = new ShellSession(workspace, currentShell);
 				tempSession.start();
-				CommandResult result = tempSession.execute(command, timeoutMs, maxOutputLines, maxOutputBytes);
+				CommandResult result = tempSession.execute(command, timeoutMs, maxOutputLines, maxOutputBytes, cwd, env);
 				tempSession.stop(terminationTimeout);
 				return result;
 			} catch (IOException e) {
@@ -422,7 +444,11 @@ public class SmartShellSessionManager {
 		void start() throws IOException {
 			ProcessBuilder pb = new ProcessBuilder(shellEnv.getCommand());
 			pb.directory(workspace.toFile());
-			pb.environment().putAll(shellEnv.getEnvironment());
+			// Only add environment variables from shell config, don't replace inherited PATH
+			Map<String, String> additionalEnv = shellEnv.getEnvironment();
+			if (additionalEnv != null && !additionalEnv.isEmpty()) {
+				pb.environment().putAll(additionalEnv);
+			}
 			pb.redirectErrorStream(false);
 
 			process = pb.start();
@@ -461,9 +487,15 @@ public class SmartShellSessionManager {
 			return process != null && process.isAlive();
 		}
 
-		CommandResult execute(String command, long timeoutMs, int maxOutputLines, Long maxOutputBytes) {
+		CommandResult execute(String command, long timeoutMs, int maxOutputLines, Long maxOutputBytes,
+							  String cwd, Map<String, String> env) {
 			if (!isAlive()) {
 				throw new IllegalStateException("Shell session is not running");
+			}
+
+			// If cwd or env is specified, we need to create a one-off process
+			if ((cwd != null && !cwd.isEmpty()) || (env != null && !env.isEmpty())) {
+				return executeWithTempSettings(command, timeoutMs, maxOutputLines, maxOutputBytes, cwd, env);
 			}
 
 			String marker = DONE_MARKER_PREFIX + UUID.randomUUID().toString().replace("-", "");
@@ -487,6 +519,91 @@ public class SmartShellSessionManager {
 
 			} catch (IOException e) {
 				throw new RuntimeException("Failed to execute command", e);
+			}
+		}
+
+		/**
+		 * Execute command with temporary working directory and/or environment variables.
+		 * Creates a one-off process for this command only.
+		 */
+		CommandResult executeWithTempSettings(String command, long timeoutMs, int maxOutputLines, Long maxOutputBytes,
+											  String cwd, Map<String, String> env) {
+			try {
+				ProcessBuilder pb = new ProcessBuilder(shellEnv.getCommand());
+
+				// Set working directory
+				if (cwd != null && !cwd.isEmpty()) {
+					pb.directory(new java.io.File(cwd));
+				} else {
+					pb.directory(workspace.toFile());
+				}
+
+				// Merge environment variables
+				Map<String, String> mergedEnv = new HashMap<>(shellEnv.getEnvironment());
+				if (env != null) {
+					mergedEnv.putAll(env);
+				}
+				pb.environment().putAll(mergedEnv);
+				pb.redirectErrorStream(true);
+
+				// Execute the command
+				Process tempProcess = pb.start();
+
+				// Write command to stdin
+				try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(tempProcess.getOutputStream()))) {
+					writer.write(command);
+					if (!command.endsWith("\n")) {
+						writer.write("\n");
+					}
+					writer.write("exit");
+					writer.write("\n");
+					writer.flush();
+				}
+
+				// Read output
+				StringBuilder output = new StringBuilder();
+				boolean finished = tempProcess.waitFor(timeoutMs, TimeUnit.MILLISECONDS);
+
+				try (BufferedReader reader = new BufferedReader(new InputStreamReader(tempProcess.getInputStream()))) {
+					String line;
+					int lineCount = 0;
+					long byteCount = 0;
+					boolean truncatedByLines = false;
+					boolean truncatedByBytes = false;
+
+					while ((line = reader.readLine()) != null) {
+						lineCount++;
+						byteCount += line.getBytes().length + 1;
+
+						if (lineCount <= maxOutputLines) {
+							if (maxOutputBytes == null || byteCount <= maxOutputBytes) {
+								output.append(line).append("\n");
+							} else {
+								truncatedByBytes = true;
+							}
+						} else {
+							truncatedByLines = true;
+						}
+					}
+
+					Integer exitCode = finished ? tempProcess.exitValue() : null;
+
+					return new CommandResult(
+						output.toString(),
+						exitCode,
+						!finished,
+						truncatedByLines,
+						truncatedByBytes,
+						lineCount,
+						byteCount
+					);
+				}
+
+			} catch (Exception e) {
+				return new CommandResult(
+					"Failed to execute command with temp settings: " + e.getMessage(),
+					1, false, false, false, 0, 0
+				);
 			}
 		}
 

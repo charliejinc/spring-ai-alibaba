@@ -89,6 +89,7 @@ public class SmartShellTool {
 
 	private final SmartShellSessionManager sessionManager;
 	private final SmartEnvironmentManager environmentManager;
+	private final BackgroundTaskManager backgroundTaskManager;
 	private final boolean autoFix;
 	private final boolean verboseErrors;
 	private final boolean autoInstall;
@@ -101,6 +102,10 @@ public class SmartShellTool {
 		// Create environment manager using a wrapper that delegates to sessionManager
 		this.environmentManager = new SmartEnvironmentManager(new SessionManagerExecutorWrapper(sessionManager),
 				autoInstall);
+		// Create background task manager
+		this.backgroundTaskManager = builder.backgroundTaskManager != null
+				? builder.backgroundTaskManager
+				: new BackgroundTaskManager();
 	}
 
 	/**
@@ -516,6 +521,264 @@ public class SmartShellTool {
 		}
 		catch (Exception e) {
 			return DatabaseResult.error("Connection test failed: " + e.getMessage());
+		}
+	}
+
+	/**
+	 * Execute a command in the background (non-blocking).
+	 * Similar to Claude Code's run_in_background.
+	 */
+	@Tool(name = "run_in_background", description = """
+		Execute a shell command in the background (non-blocking).
+
+		The command starts running immediately but returns a task ID.
+		Use list_background_tasks to check status and kill_background_task to stop it.
+
+		Example use cases:
+		- Start a long-running server (like npm dev, python server)
+		- Run a build process while continuing other work
+		- Start multiple independent commands in parallel
+
+		Returns a task ID that can be used to:
+		- Check status with list_background_tasks
+		- Get output with get_background_task_output
+		- Stop with kill_background_task
+
+		Note: Background tasks have a maximum timeout of 10 minutes.
+		""")
+	public BackgroundTaskResult runInBackground(
+			@ToolParam(description = "The shell command to execute in the background") String command,
+			@ToolParam(description = "Optional description of what this task does", required = false) String description,
+			@ToolParam(description = "Working directory for the command (optional)", required = false) String cwd,
+			@ToolParam(description = "Timeout in milliseconds (max: 600000, default: 60000)", required = false) Long timeout,
+			ToolContext toolContext) {
+
+		RunnableConfig config = (RunnableConfig) toolContext.getContext().get(AGENT_CONFIG_CONTEXT_KEY);
+
+		if (command == null || command.trim().isEmpty()) {
+			return BackgroundTaskResult.error("Error: Command cannot be empty.");
+		}
+
+		long effectiveTimeout = timeout != null ? Math.min(timeout, 600000) : 60000;
+		String effectiveCwd = cwd;
+		String effectiveDescription = description != null ? description : "Background task: " + command;
+
+		log.info("Starting background task: {} (timeout: {}ms)", command, effectiveTimeout);
+
+		try {
+			BackgroundTask task = backgroundTaskManager.submitTask(
+					command,
+					effectiveDescription,
+					effectiveCwd,
+					effectiveTimeout,
+					(t) -> {
+						// Execute the command using session manager with temporary cwd
+						return sessionManager.executeCommand(
+								command,
+								config,
+								autoFix,
+								effectiveCwd,
+								null,
+								effectiveTimeout
+						).getBaseResult();
+					}
+			);
+
+			return BackgroundTaskResult.started(
+					task.getTaskId(),
+					"Background task started. Task ID: " + task.getTaskId() + "\n" +
+					"Command: " + command + "\n" +
+					"Description: " + effectiveDescription + "\n" +
+					"Use list_background_tasks to check status or kill_background_task to stop."
+			);
+		}
+		catch (Exception e) {
+			log.error("Failed to start background task", e);
+			return BackgroundTaskResult.error("Failed to start background task: " + e.getMessage());
+		}
+	}
+
+	/**
+	 * List all running background tasks.
+	 * Similar to Claude Code's list_tasks.
+	 */
+	@Tool(name = "list_background_tasks", description = """
+		List all running background tasks.
+
+		Returns information about each background task including:
+		- Task ID (used to get output or kill the task)
+		- Command being executed
+		- Status (RUNNING, COMPLETED, FAILED, CANCELLED, TIMEOUT)
+		- Start time
+		- Duration (if completed)
+
+		Use this to monitor long-running operations.
+		""")
+	public BackgroundTaskListResult listBackgroundTasks() {
+		List<BackgroundTask> runningTasks = backgroundTaskManager.getRunningTasks();
+		List<BackgroundTask> allTasks = backgroundTaskManager.getAllTasks();
+
+		List<BackgroundTaskInfo> taskInfos = new ArrayList<>();
+		for (BackgroundTask task : allTasks) {
+			BackgroundTaskInfo info = new BackgroundTaskInfo(
+					task.getTaskId(),
+					task.getCommand(),
+					task.getDescription(),
+					task.getStatus().name(),
+					task.getStartTime().toString(),
+					task.getEndTime() != null ? task.getEndTime().toString() : null,
+					task.getDurationMs(),
+					task.getExitCode(),
+					task.isRunning()
+			);
+			taskInfos.add(info);
+		}
+
+		return new BackgroundTaskListResult(
+				runningTasks.size(),
+				taskInfos,
+				runningTasks.isEmpty()
+						? "No running background tasks."
+						: "Found " + runningTasks.size() + " running task(s)."
+		);
+	}
+
+	/**
+	 * Get the output of a background task (non-blocking).
+	 * Returns current output even if task is still running.
+	 */
+	@Tool(name = "get_background_task_output", description = """
+		Get the output of a background task.
+
+		Can be called while task is running (non-blocking) or after completion.
+		Returns the captured output up to this point.
+
+		Use list_background_tasks first to get the task ID.
+		""")
+	public BackgroundTaskOutputResult getBackgroundTaskOutput(
+			@ToolParam(description = "The task ID returned by run_in_background") String taskId) {
+
+		if (taskId == null || taskId.trim().isEmpty()) {
+			return BackgroundTaskOutputResult.error("Task ID is required.");
+		}
+
+		BackgroundTask task = backgroundTaskManager.getTask(taskId);
+		if (task == null) {
+			return BackgroundTaskOutputResult.error("Task not found: " + taskId);
+		}
+
+		BackgroundTask.Status status = task.getStatus();
+		String output = task.getOutput();
+		if (output == null || output.isEmpty()) {
+			output = "(No output yet)";
+		}
+
+		return new BackgroundTaskOutputResult(
+				taskId,
+				status.name(),
+				output,
+				task.getExitCode(),
+				task.isRunning(),
+				task.getDurationMs()
+		);
+	}
+
+	/**
+	 * Wait for a background task to complete and get its output.
+	 * Blocks until the task finishes or timeout occurs.
+	 */
+	@Tool(name = "wait_background_task", description = """
+		Wait for a background task to complete and get its output.
+
+		This is a blocking call that waits for the task to finish.
+		Use a reasonable timeout to avoid hanging.
+
+		Use list_background_tasks first to get the task ID.
+		""")
+	public BackgroundTaskOutputResult waitBackgroundTask(
+			@ToolParam(description = "The task ID returned by run_in_background") String taskId,
+			@ToolParam(description = "Wait timeout in milliseconds (default: 60000)", required = false) Long timeout) {
+
+		if (taskId == null || taskId.trim().isEmpty()) {
+			return BackgroundTaskOutputResult.error("Task ID is required.");
+		}
+
+		long waitTimeout = timeout != null ? timeout : 60000;
+
+		SmartShellSessionManager.CommandResult result = backgroundTaskManager.waitForTask(taskId, waitTimeout);
+
+		if (result == null) {
+			// Check if task exists
+			BackgroundTask task = backgroundTaskManager.getTask(taskId);
+			if (task == null) {
+				return BackgroundTaskOutputResult.error("Task not found: " + taskId);
+			}
+			return new BackgroundTaskOutputResult(
+					taskId,
+					task.getStatus().name(),
+					"Task still running after " + waitTimeout + "ms timeout.",
+					null,
+					true,
+					task.getDurationMs()
+			);
+		}
+
+		String output = result.getOutput();
+		if (output == null || output.isEmpty()) {
+			output = "(No output)";
+		}
+
+		return new BackgroundTaskOutputResult(
+				taskId,
+				result.isSuccess() ? "COMPLETED" : "FAILED",
+				output,
+				result.getExitCode(),
+				false,
+				result.isTimedOut() ? -1 : (output.length() > 0 ? output.length() : 0)
+		);
+	}
+
+	/**
+	 * Kill a running background task.
+	 * Similar to Claude Code's kill.
+	 */
+	@Tool(name = "kill_background_task", description = """
+		Kill a running background task.
+
+		Stops a background task that is currently executing.
+		Use list_background_tasks to find the task ID.
+
+		Returns success if the task was stopped, or if it had already completed.
+		""")
+	public BackgroundTaskResult killBackgroundTask(
+			@ToolParam(description = "The task ID returned by run_in_background") String taskId) {
+
+		if (taskId == null || taskId.trim().isEmpty()) {
+			return BackgroundTaskResult.error("Task ID is required.");
+		}
+
+		BackgroundTask task = backgroundTaskManager.getTask(taskId);
+		if (task == null) {
+			return BackgroundTaskResult.error("Task not found: " + taskId);
+		}
+
+		if (task.isCompleted()) {
+			return BackgroundTaskResult.success(
+					"Task " + taskId + " has already completed with status: " + task.getStatus()
+			);
+		}
+
+		boolean stopped = backgroundTaskManager.stopTask(taskId);
+
+		if (stopped) {
+			return BackgroundTaskResult.success(
+					"Task " + taskId + " has been stopped."
+			);
+		}
+		else {
+			return BackgroundTaskResult.error(
+					"Failed to stop task " + taskId + ". Task may have already completed."
+			);
 		}
 	}
 
@@ -1358,6 +1621,195 @@ public class SmartShellTool {
 
 	}
 
+	// Background task result classes
+
+	public static class BackgroundTaskResult {
+
+		private final boolean success;
+		private final String message;
+		private final String taskId;
+
+		private BackgroundTaskResult(boolean success, String message, String taskId) {
+			this.success = success;
+			this.message = message;
+			this.taskId = taskId;
+		}
+
+		public static BackgroundTaskResult started(String taskId, String message) {
+			return new BackgroundTaskResult(true, message, taskId);
+		}
+
+		public static BackgroundTaskResult success(String message) {
+			return new BackgroundTaskResult(true, message, null);
+		}
+
+		public static BackgroundTaskResult error(String message) {
+			return new BackgroundTaskResult(false, message, null);
+		}
+
+		public boolean isSuccess() {
+			return success;
+		}
+
+		public String getMessage() {
+			return message;
+		}
+
+		public String getTaskId() {
+			return taskId;
+		}
+	}
+
+	public static class BackgroundTaskListResult {
+
+		private final int runningCount;
+		private final List<BackgroundTaskInfo> tasks;
+		private final String message;
+
+		public BackgroundTaskListResult(int runningCount, List<BackgroundTaskInfo> tasks, String message) {
+			this.runningCount = runningCount;
+			this.tasks = tasks;
+			this.message = message;
+		}
+
+		public int getRunningCount() {
+			return runningCount;
+		}
+
+		public List<BackgroundTaskInfo> getTasks() {
+			return tasks;
+		}
+
+		public String getMessage() {
+			return message;
+		}
+	}
+
+	public static class BackgroundTaskInfo {
+
+		private final String taskId;
+		private final String command;
+		private final String description;
+		private final String status;
+		private final String startTime;
+		private final String endTime;
+		private final long durationMs;
+		private final Integer exitCode;
+		private final boolean running;
+
+		public BackgroundTaskInfo(String taskId, String command, String description, String status,
+								  String startTime, String endTime, long durationMs, Integer exitCode, boolean running) {
+			this.taskId = taskId;
+			this.command = command;
+			this.description = description;
+			this.status = status;
+			this.startTime = startTime;
+			this.endTime = endTime;
+			this.durationMs = durationMs;
+			this.exitCode = exitCode;
+			this.running = running;
+		}
+
+		public String getTaskId() {
+			return taskId;
+		}
+
+		public String getCommand() {
+			return command;
+		}
+
+		public String getDescription() {
+			return description;
+		}
+
+		public String getStatus() {
+			return status;
+		}
+
+		public String getStartTime() {
+			return startTime;
+		}
+
+		public String getEndTime() {
+			return endTime;
+		}
+
+		public long getDurationMs() {
+			return durationMs;
+		}
+
+		public Integer getExitCode() {
+			return exitCode;
+		}
+
+		public boolean isRunning() {
+			return running;
+		}
+	}
+
+	public static class BackgroundTaskOutputResult {
+
+		private final String taskId;
+		private final String status;
+		private final String output;
+		private final Integer exitCode;
+		private final boolean running;
+		private final long durationMs;
+		private final String error;
+
+		private BackgroundTaskOutputResult(String taskId, String status, String output,
+										   Integer exitCode, boolean running, long durationMs) {
+			this(taskId, status, output, exitCode, running, durationMs, null);
+		}
+
+		private BackgroundTaskOutputResult(String taskId, String status, String output,
+										   Integer exitCode, boolean running, long durationMs, String error) {
+			this.taskId = taskId;
+			this.status = status;
+			this.output = output;
+			this.exitCode = exitCode;
+			this.running = running;
+			this.durationMs = durationMs;
+			this.error = error;
+		}
+
+		public static BackgroundTaskOutputResult error(String message) {
+			return new BackgroundTaskOutputResult(null, null, null, null, false, 0, message);
+		}
+
+		public String getTaskId() {
+			return taskId;
+		}
+
+		public String getStatus() {
+			return status;
+		}
+
+		public String getOutput() {
+			return output;
+		}
+
+		public Integer getExitCode() {
+			return exitCode;
+		}
+
+		public boolean isRunning() {
+			return running;
+		}
+
+		public long getDurationMs() {
+			return durationMs;
+		}
+
+		public String getError() {
+			return error;
+		}
+
+		public boolean isSuccess() {
+			return error == null && !running && exitCode != null && exitCode == 0;
+		}
+	}
+
 	// Internal records and enums
 
 	private record CommandParseResult(String command, ExecutionTarget target, Set<String> requiredCommands, String host,
@@ -1436,6 +1888,8 @@ public class SmartShellTool {
 		private final String workspaceRoot;
 
 		private SmartShellSessionManager sessionManager;
+
+		private BackgroundTaskManager backgroundTaskManager;
 
 		private List<String> startupCommands = new ArrayList<>();
 
@@ -1520,6 +1974,11 @@ public class SmartShellTool {
 
 		public Builder withSessionManager(SmartShellSessionManager sessionManager) {
 			this.sessionManager = sessionManager;
+			return this;
+		}
+
+		public Builder withBackgroundTaskManager(BackgroundTaskManager backgroundTaskManager) {
+			this.backgroundTaskManager = backgroundTaskManager;
 			return this;
 		}
 

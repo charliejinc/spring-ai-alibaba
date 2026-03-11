@@ -79,10 +79,12 @@ public class ShellEnvironment {
 
 	/**
 	 * Get the command to check if a command exists in this shell.
+	 * Uses try-catch to get non-zero exit code when command not found.
 	 */
 	public String getCheckCommand(String command) {
 		return switch (type) {
-			case POWERSHELL -> String.format("Get-Command %s -ErrorAction SilentlyContinue", command);
+			// PowerShell: use try-catch to get proper exit code
+			case POWERSHELL -> String.format("try { Get-Command %s -ErrorAction Stop | Out-Null } catch { exit 1 }", command);
 			case CMD -> String.format("where %s", command);
 			case WSL -> String.format("wsl which %s", command);
 			case GIT_BASH, BASH, ZSH, SH -> String.format("which %s", command);
