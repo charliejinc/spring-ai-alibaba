@@ -88,6 +88,13 @@
             <version>${fastjson.version}</version>
         </dependency>
 
+        <!-- JSch for SSH connections -->
+        <dependency>
+            <groupId>com.jcraft</groupId>
+            <artifactId>jsch</artifactId>
+            <version>0.1.55</version>
+        </dependency>
+
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
