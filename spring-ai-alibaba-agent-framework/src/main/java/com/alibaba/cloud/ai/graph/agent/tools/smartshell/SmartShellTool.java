@@ -1399,7 +1399,12 @@ public class SmartShellTool {
 		Set<String> commands = new HashSet<>();
 		String[] parts = command.split("\\s+");
 		if (parts.length > 0) {
-			commands.add(parts[0]);
+			String baseCmd = parts[0];
+			// pip/pip3/python/python3 are handled by detectRequiredCommands, skip here
+			Set<String> pythonCommands = new HashSet<>(java.util.Arrays.asList("pip", "pip3", "python", "python3"));
+			if (!pythonCommands.contains(baseCmd)) {
+				commands.add(baseCmd);
+			}
 		}
 		return commands;
 	}

@@ -309,15 +309,20 @@ public class SmartShellSessionManager {
 
 	/**
 	 * Directly check if a command exists in system PATH.
-	 * Uses Java's ProcessBuilder which inherits environment from current process.
+	 * On Windows, refreshes PATH from registry to detect newly-installed commands.
 	 */
 	private boolean commandExistsDirect(String command) {
 		String os = System.getProperty("os.name").toLowerCase();
 		try {
 			ProcessBuilder pb;
 			if (os.contains("windows")) {
-				// Use cmd /c where - more reliable than PowerShell Get-Command
+				// Use cmd /c where with refreshed PATH from registry
+				// This catches commands installed after JVM startup (e.g., pip after Python install)
 				pb = new ProcessBuilder("cmd", "/c", "where", command);
+				String freshPath = getWindowsFreshPath();
+				if (freshPath != null) {
+					pb.environment().put("PATH", freshPath);
+				}
 			} else {
 				pb = new ProcessBuilder("which", command);
 			}
@@ -329,6 +334,99 @@ public class SmartShellSessionManager {
 			log.debug("Direct command check failed for '{}': {}", command, e.getMessage());
 			return false;
 		}
+	}
+
+	/**
+	 * Get fresh PATH from Windows registry, combining system and user PATH.
+	 * This captures PATH changes made after JVM startup (e.g., new software installs).
+	 */
+	private static String getWindowsFreshPath() {
+		try {
+			// Query system PATH from registry
+			String systemPath = queryRegistryPath(
+				"HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment", "Path");
+			// Query user PATH from registry
+			String userPath = queryRegistryPath("HKCU\\Environment", "Path");
+
+			StringBuilder freshPath = new StringBuilder();
+			if (systemPath != null && !systemPath.isEmpty()) {
+				freshPath.append(systemPath);
+			}
+			if (userPath != null && !userPath.isEmpty()) {
+				if (freshPath.length() > 0) {
+					freshPath.append(";");
+				}
+				freshPath.append(userPath);
+			}
+
+			if (freshPath.length() > 0) {
+				log.debug("Refreshed PATH from registry ({} chars)", freshPath.length());
+				return freshPath.toString();
+			}
+		} catch (Exception e) {
+			log.debug("Failed to refresh PATH from registry: {}", e.getMessage());
+		}
+		return null;
+	}
+
+	/**
+	 * Query a value from the Windows registry using reg query.
+	 */
+	private static String queryRegistryPath(String key, String valueName) {
+		try {
+			ProcessBuilder pb = new ProcessBuilder("reg", "query", key, "/v", valueName);
+			pb.redirectErrorStream(true);
+			Process process = pb.start();
+			boolean finished = process.waitFor(3, java.util.concurrent.TimeUnit.SECONDS);
+			if (finished && process.exitValue() == 0) {
+				try (BufferedReader reader = new BufferedReader(
+						new InputStreamReader(process.getInputStream()))) {
+					String line;
+					while ((line = reader.readLine()) != null) {
+						// Format: "    Path    REG_EXPAND_SZ    C:\Windows\system32;..."
+						line = line.trim();
+						if (line.contains("REG_SZ") || line.contains("REG_EXPAND_SZ")) {
+							int typeEnd = line.indexOf("REG_SZ");
+							if (typeEnd == -1) {
+								typeEnd = line.indexOf("REG_EXPAND_SZ");
+								if (typeEnd != -1) {
+									typeEnd += "REG_EXPAND_SZ".length();
+								}
+							} else {
+								typeEnd += "REG_SZ".length();
+							}
+							if (typeEnd != -1 && typeEnd < line.length()) {
+								String value = line.substring(typeEnd).trim();
+								// Expand %USERPROFILE% and similar variables
+								value = expandEnvironmentVariables(value);
+								return value;
+							}
+						}
+					}
+				}
+			}
+		} catch (Exception e) {
+			log.debug("Registry query failed for {}: {}", key, e.getMessage());
+		}
+		return null;
+	}
+
+	/**
+	 * Expand common Windows environment variables in a string.
+	 */
+	private static String expandEnvironmentVariables(String value) {
+		if (value == null || !value.contains("%")) {
+			return value;
+		}
+		// Expand known environment variables
+		Map<String, String> currentEnv = System.getenv();
+		for (Map.Entry<String, String> entry : currentEnv.entrySet()) {
+			String varPattern = "%" + entry.getKey() + "%";
+			if (value.contains(varPattern)) {
+				value = value.replace(varPattern, entry.getValue());
+			}
+		}
+		return value;
 	}
 
 	/**
@@ -509,6 +607,14 @@ public class SmartShellSessionManager {
 			if (additionalEnv != null && !additionalEnv.isEmpty()) {
 				pb.environment().putAll(additionalEnv);
 			}
+			// On Windows, refresh PATH from registry to pick up newly-installed commands
+			String os = System.getProperty("os.name").toLowerCase();
+			if (os.contains("windows")) {
+				String freshPath = getWindowsFreshPath();
+				if (freshPath != null) {
+					pb.environment().put("PATH", freshPath);
+				}
+			}
 			pb.redirectErrorStream(false);
 
 			process = pb.start();
@@ -612,6 +718,15 @@ public class SmartShellSessionManager {
 						mergedEnv.putAll(env);
 					}
 					pb.environment().putAll(mergedEnv);
+				}
+
+				// On Windows, refresh PATH from registry to pick up newly-installed commands
+				String osName = System.getProperty("os.name").toLowerCase();
+				if (osName.contains("windows")) {
+					String freshPath = getWindowsFreshPath();
+					if (freshPath != null) {
+						pb.environment().put("PATH", freshPath);
+					}
 				}
 
 				pb.redirectErrorStream(true);
