@@ -75,9 +75,15 @@
     </ciManagement>
 
     <distributionManagement>
+        <repository>
+            <id>releases</id>
+            <!-- TODO: 替换为你的私有仓库 release 地址，例如 https://nexus.example.com/repository/maven-releases/ -->
+            <url>http://nexus.shangjinuu.com:8081/nexus/content/repositories/releases/</url>
+        </repository>
         <snapshotRepository>
             <id>snapshots</id>
-            <url>http://mvnrepo.alibaba-inc.com/mvn/snapshots</url>
+            <!-- TODO: 替换为你的私有仓库 snapshot 地址，例如 https://nexus.example.com/repository/maven-snapshots/ -->
+            <url>http://nexus.shangjinuu.com:8081/nexus/content/repositories/snapshots/</url>
         </snapshotRepository>
     </distributionManagement>
 
