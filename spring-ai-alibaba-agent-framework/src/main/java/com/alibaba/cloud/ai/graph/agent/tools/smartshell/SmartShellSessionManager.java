@@ -698,10 +698,16 @@ public class SmartShellSessionManager {
 											  String cwd, Map<String, String> env) {
 			try {
 				ProcessBuilder pb;
+				String osName = System.getProperty("os.name").toLowerCase();
+				boolean isWindows = osName.contains("windows");
 
 				// For WSL, use wsl -e bash -c 'command' format to properly execute commands
 				if (shellEnv.getType() == ShellEnvironment.Type.WSL) {
 					pb = new ProcessBuilder("wsl", "-e", "bash", "-c", command);
+				} else if (isWindows && shellEnv.getType() == ShellEnvironment.Type.GIT_BASH) {
+					// On Windows with Git Bash, use cmd /c to execute the command directly
+					// This ensures we use the Windows PATH which includes Python and other Windows-installed programs
+					pb = new ProcessBuilder("cmd", "/c", command);
 				} else {
 					pb = new ProcessBuilder(shellEnv.getCommand());
 
@@ -721,8 +727,7 @@ public class SmartShellSessionManager {
 				}
 
 				// On Windows, refresh PATH from registry to pick up newly-installed commands
-				String osName = System.getProperty("os.name").toLowerCase();
-				if (osName.contains("windows")) {
+				if (isWindows) {
 					String freshPath = getWindowsFreshPath();
 					if (freshPath != null) {
 						pb.environment().put("PATH", freshPath);
@@ -734,14 +739,18 @@ public class SmartShellSessionManager {
 				// Execute the command
 				Process tempProcess = pb.start();
 
-				// Write command to stdin
+				// Write command to stdin (only for interactive shells, not for cmd /c)
 				try (BufferedWriter writer = new BufferedWriter(EncodingUtils.createOutputStreamWriter(tempProcess.getOutputStream()))) {
 					writer.write(command);
 					if (!command.endsWith("\n")) {
 						writer.write("\n");
 					}
-					writer.write("exit");
-					writer.write("\n");
+					// For cmd /c, we don't need to write exit - it auto-exits after command
+					// For interactive shells, we need to write exit
+					if (!(isWindows && shellEnv.getType() == ShellEnvironment.Type.GIT_BASH)) {
+						writer.write("exit");
+						writer.write("\n");
+					}
 					writer.flush();
 				}
 
