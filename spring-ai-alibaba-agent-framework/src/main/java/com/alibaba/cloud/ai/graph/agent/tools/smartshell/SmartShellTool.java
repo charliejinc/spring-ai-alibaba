@@ -22,6 +22,7 @@ import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -83,22 +84,34 @@ public class SmartShellTool {
 		The working directory is managed automatically. Use standard shell commands (ls/dir, pwd/cd)
 		to navigate and inspect the filesystem.
 
-		For long-running commands, output may be truncated. Commands exceeding the timeout
-		will be terminated and the session restarted.
+		For long-running commands, output may be truncated (default: 500 lines or 1MB).
+		Use 'command | head -N' or 'command | tail -N' to limit output.
+		Commands exceeding the timeout will be terminated and the session restarted.
+
+		Security: Potentially dangerous commands (rm -rf, curl | bash, sudo, etc.) will trigger warnings.
 		""";
 
 	private final SmartShellSessionManager sessionManager;
 	private final SmartEnvironmentManager environmentManager;
 	private final BackgroundTaskManager backgroundTaskManager;
+	private final PermissionManager permissionManager;
+	private final MirrorConfigurator mirrorConfigurator;
+	private final VirtualEnvironmentManager virtualEnvManager;
+	private final WorkingDirectoryManager workingDirManager;
 	private final boolean autoFix;
 	private final boolean verboseErrors;
 	private final boolean autoInstall;
+	private final int maxOutputLines;
+	private final Long maxOutputBytes;
 
 	private SmartShellTool(Builder builder) {
 		this.sessionManager = builder.sessionManager;
 		this.autoFix = builder.autoFix;
 		this.verboseErrors = builder.verboseErrors;
 		this.autoInstall = builder.autoInstall;
+		this.permissionManager = builder.permissionManager;
+		this.maxOutputLines = builder.maxOutputLines;
+		this.maxOutputBytes = builder.maxOutputBytes;
 		// Create environment manager using a wrapper that delegates to sessionManager
 		this.environmentManager = new SmartEnvironmentManager(new SessionManagerExecutorWrapper(sessionManager),
 				autoInstall);
@@ -106,6 +119,12 @@ public class SmartShellTool {
 		this.backgroundTaskManager = builder.backgroundTaskManager != null
 				? builder.backgroundTaskManager
 				: new BackgroundTaskManager();
+		// Create new managers
+		this.mirrorConfigurator = new MirrorConfigurator();
+		this.virtualEnvManager = new VirtualEnvironmentManager();
+		this.workingDirManager = builder.workingDirManager != null
+				? builder.workingDirManager
+				: new WorkingDirectoryManager(java.nio.file.Path.of(builder.workspaceRoot));
 	}
 
 	/**
@@ -119,6 +138,8 @@ public class SmartShellTool {
 		@ToolParam(description = "Enable auto-fix for this command (overrides default).", required = false) Boolean enableAutoFix,
 		@ToolParam(description = "Try alternative shells if command fails (default: true).", required = false) Boolean tryAlternatives,
 		ToolContext toolContext) { // @formatter:on
+
+		PermissionManager.PermissionResult permissionResult = null;
 
 		try {
 			RunnableConfig config = (RunnableConfig) toolContext.getContext().get(AGENT_CONFIG_CONTEXT_KEY);
@@ -134,6 +155,23 @@ public class SmartShellTool {
 
 			if (command == null || command.trim().isEmpty()) {
 				return SmartShellResult.error("Error: Command cannot be empty.");
+			}
+
+			// Permission check
+			if (permissionManager != null) {
+				permissionResult = permissionManager.checkPermission(command);
+				if (permissionResult.isDenied()) {
+					log.warn("Command denied by permission policy: {}", command);
+					return SmartShellResult.error("Permission denied: " + permissionResult.getMessage(),
+							"Command matches a denied pattern: " + permissionResult.getMatchedPattern());
+				}
+				// If requires confirmation or is sensitive, add warning to result later
+			}
+
+			// Convert Windows paths to WSL paths if using WSL
+			ShellEnvironment.Type currentShellType = sessionManager.getCurrentShellType(config);
+			if (currentShellType == ShellEnvironment.Type.WSL) {
+				command = convertWindowsPathsToWsl(command);
 			}
 
 			// Parse command for special URI formats
@@ -195,7 +233,7 @@ public class SmartShellTool {
 					shouldAutoFix);
 
 			// Format the result
-			return formatResult(result, command);
+			return formatResult(result, command, permissionResult);
 
 		}
 		catch (Exception e) {
@@ -234,6 +272,17 @@ public class SmartShellTool {
 
 		log.info("Executing SSH command on {}@{}:{}", username, host, effectivePort);
 
+		// Permission check for SSH command
+		PermissionManager.PermissionResult permissionResult = null;
+		if (permissionManager != null) {
+			permissionResult = permissionManager.checkPermission("ssh " + command);
+			if (permissionResult.isDenied()) {
+				log.warn("SSH command denied by permission policy: {}", command);
+				return SmartShellResult.error("Permission denied: " + permissionResult.getMessage(),
+						"Command matches a denied pattern: " + permissionResult.getMatchedPattern());
+			}
+		}
+
 		try {
 			// Ensure sshpass is available
 			SmartEnvironmentManager.CommandStatus sshpassStatus = environmentManager.ensureCommandAvailable("sshpass",
@@ -260,7 +309,7 @@ public class SmartShellTool {
 			SmartShellSessionManager.SmartCommandResult result = sessionManager.executeCommand(sshCommand, config,
 					autoFix);
 
-			return formatResult(result, "ssh://" + username + "@" + host + "/" + command);
+			return formatResult(result, "ssh://" + username + "@" + host + "/" + command, permissionResult);
 
 		}
 		catch (Exception e) {
@@ -798,6 +847,212 @@ public class SmartShellTool {
 		}
 	}
 
+	// ========== New Tools: Runtime Environment Detection ==========
+
+	/**
+	 * Detect available runtime environments (Python, Node.js, etc.).
+	 */
+	// @formatter:off
+	@Tool(name = "detect_runtime_environments", description = """
+		Detect available runtime environments on the system (Python, Node.js, npm, pip).
+		Returns version information and installation suggestions for missing runtimes.
+		""")
+	public Map<String, List<Map<String, Object>>> detectRuntimeEnvironments() { // @formatter:on
+		RuntimeEnvironmentDetector detector = new RuntimeEnvironmentDetector();
+		Map<String, List<RuntimeEnvironmentDetector.RuntimeInfo>> all = detector.detectAll();
+
+		// Convert to Map<String, List<Map<String, Object>>>
+		Map<String, List<Map<String, Object>>> result = new java.util.HashMap<>();
+		for (var entry : all.entrySet()) {
+			List<Map<String, Object>> list = entry.getValue().stream()
+				.map(info -> {
+					Map<String, Object> m = new java.util.HashMap<>();
+					m.put("name", info.getName());
+					m.put("executable", info.getExecutable());
+					m.put("version", info.getVersion());
+					m.put("available", info.isAvailable());
+					m.put("installSuggestion", info.getInstallSuggestion());
+					return m;
+				})
+				.toList();
+			result.put(entry.getKey(), list);
+		}
+		return result;
+	}
+
+	/**
+	 * Get mirror configuration status.
+	 */
+	// @formatter:off
+	@Tool(name = "get_mirror_status", description = """
+		Get the current mirror configuration status for npm and pip.
+		Shows whether the system is in China and what mirrors are recommended.
+		""")
+	public Map<String, Object> getMirrorStatus() { // @formatter:on
+		return mirrorConfigurator.getMirrorStatus();
+	}
+
+	/**
+	 * Configure npm/pip mirror for China region.
+	 */
+	// @formatter:off
+	@Tool(name = "configure_mirrors", description = """
+		Configure npm and pip mirrors for optimal performance in China region.
+		Automatically detects if the system is in China and applies appropriate mirrors.
+		""")
+	public SmartShellResult configureMirrors(ToolContext toolContext) { // @formatter:on
+		try {
+			StringBuilder output = new StringBuilder();
+
+			// Configure npm mirror
+			if (mirrorConfigurator.needsNpmMirrorChange()) {
+				String npmCmd = mirrorConfigurator.getNpmMirrorConfigCommands();
+				output.append("npm: ").append(mirrorConfigurator.getRecommendedNpmRegistry()).append("\n");
+				output.append("To apply, run: ").append(npmCmd).append("\n");
+			} else {
+				output.append("npm: Already using optimal mirror\n");
+			}
+
+			// Configure pip mirror
+			if (mirrorConfigurator.needsPipMirrorChange()) {
+				String[] pipCmds = mirrorConfigurator.getPipMirrorConfigCommands();
+				output.append("\npip: ").append(mirrorConfigurator.getRecommendedPipMirror()).append("\n");
+				output.append("To apply, run: ").append(String.join(" && ", pipCmds)).append("\n");
+			} else {
+				output.append("\npip: Already using optimal mirror\n");
+			}
+
+			output.append("\nCountry detection: ").append(mirrorConfigurator.isInChina() ? "China" : "Other");
+
+			return SmartShellResult.success(output.toString());
+		} catch (Exception e) {
+			return SmartShellResult.error("Failed to configure mirrors: " + e.getMessage());
+		}
+	}
+
+	/**
+	 * Detect virtual environments in a directory.
+	 */
+	// @formatter:off
+	@Tool(name = "detect_virtual_environments", description = """
+		Detect virtual environments (Python venv, conda, Node.js) in a directory.
+		Returns information about detected environments and their activation commands.
+		""")
+	public List<Map<String, Object>> detectVirtualEnvironments(
+			@ToolParam(description = "Directory to scan for virtual environments") String directory) { // @formatter:on
+		try {
+			Path dir = directory != null && !directory.isEmpty()
+				? java.nio.file.Path.of(directory)
+				: workingDirManager.getCurrent();
+
+			List<VirtualEnvironmentManager.VirtualEnvInfo> envs = virtualEnvManager.detectVirtualEnvironments(dir);
+
+			return envs.stream().map(env -> {
+				Map<String, Object> info = new java.util.HashMap<>();
+				info.put("type", env.getType().name());
+				info.put("path", env.getPath().toString());
+				info.put("activationCommand", env.getActivationCommand());
+				info.put("python", env.getPython());
+				info.put("npm", env.getNpm());
+				return info;
+			}).toList();
+		} catch (Exception e) {
+			return List.of(Map.of("error", e.getMessage()));
+		}
+	}
+
+	/**
+	 * Get current working directory information.
+	 */
+	// @formatter:off
+	@Tool(name = "get_working_directory", description = """
+		Get the current working directory and navigation history.
+		""")
+	public Map<String, Object> getWorkingDirectory() { // @formatter:on
+		Map<String, Object> info = new java.util.HashMap<>();
+		info.put("current", workingDirManager.getCurrent() != null
+			? workingDirManager.getCurrent().toString() : "unknown");
+		info.put("recent", workingDirManager.getRecent(5).stream()
+			.map(Path::toString).toList());
+		info.put("bookmarks", workingDirManager.getBookmarks());
+		return info;
+	}
+
+	/**
+	 * Change working directory.
+	 */
+	// @formatter:off
+	@Tool(name = "change_working_directory", description = """
+		Change the current working directory.
+		Supports relative paths, absolute paths, ~ (home), and environment variables.
+		""")
+	public SmartShellResult changeWorkingDirectory(
+			@ToolParam(description = "Target directory (supports ~, ${VAR}, relative and absolute paths)") String path,
+			ToolContext toolContext) { // @formatter:on
+		try {
+			Path expanded = workingDirManager.expandPath(path);
+			Path newDir = workingDirManager.changeDirectory(expanded);
+
+			if (newDir != null) {
+				return SmartShellResult.success("Changed directory to: " + newDir);
+			} else {
+				return SmartShellResult.error("Failed to change directory: " + path);
+			}
+		} catch (Exception e) {
+			return SmartShellResult.error("Failed to change directory: " + e.getMessage());
+		}
+	}
+
+	/**
+	 * Navigate to parent directory.
+	 */
+	// @formatter:off
+	@Tool(name = "go_to_parent_directory", description = """
+		Go to the parent directory.
+		""")
+	public SmartShellResult goToParentDirectory() { // @formatter:on
+		Path parent = workingDirManager.goUp();
+		if (parent != null) {
+			return SmartShellResult.success("Now in: " + parent);
+		}
+		return SmartShellResult.error("Already at root directory");
+	}
+
+	/**
+	 * Save a directory bookmark.
+	 */
+	// @formatter:off
+	@Tool(name = "save_directory_bookmark", description = """
+		Save the current directory as a bookmark with a name for quick access.
+		""")
+	public SmartShellResult saveDirectoryBookmark(
+			@ToolParam(description = "Bookmark name") String name) { // @formatter:on
+		if (name == null || name.trim().isEmpty()) {
+			return SmartShellResult.error("Bookmark name is required");
+		}
+		workingDirManager.saveBookmark(name.trim());
+		return SmartShellResult.success("Saved bookmark: " + name);
+	}
+
+	/**
+	 * Go to a bookmarked directory.
+	 */
+	// @formatter:off
+	@Tool(name = "go_to_bookmark", description = """
+		Navigate to a previously saved bookmark.
+		""")
+	public SmartShellResult goToBookmark(
+			@ToolParam(description = "Bookmark name") String name) { // @formatter:on
+		if (name == null || name.trim().isEmpty()) {
+			return SmartShellResult.error("Bookmark name is required");
+		}
+		Path bookmarked = workingDirManager.goToBookmark(name.trim());
+		if (bookmarked != null) {
+			return SmartShellResult.success("Now in: " + bookmarked);
+		}
+		return SmartShellResult.error("Bookmark not found: " + name);
+	}
+
 	private CommandParseResult parseCommand(String command) {
 		// Parse special URI formats
 		if (command.startsWith("ssh://")) {
@@ -1150,6 +1405,19 @@ public class SmartShellTool {
 	}
 
 	/**
+	 * Convert Windows paths to WSL paths in a command string.
+	 * This handles paths like C:\Users\... -> /mnt/c/Users/...
+	 */
+	private String convertWindowsPathsToWsl(String command) {
+		if (command == null || command.isEmpty()) {
+			return command;
+		}
+
+		// Use PathConverter to convert Windows paths
+		return PathConverter.windowsToWsl(command);
+	}
+
+	/**
 	 * Auto-detect required commands based on the command being executed.
 	 * This analyzes the command string to determine what dependencies are needed.
 	 */
@@ -1161,66 +1429,46 @@ public class SmartShellTool {
 
 		String lowerCommand = command.toLowerCase();
 
-		// Check for Python execution
+		// Check for Python execution - always add python as potential requirement
+		// The actual availability check will be done by ensureCommandAvailable later
 		if (lowerCommand.startsWith("python") || lowerCommand.startsWith("python3") ||
-			lowerCommand.contains("python ") || lowerCommand.contains("python3 ")) {
-			// Check if python is actually available
-			if (!sessionManager.commandExists("python", null) &&
-				!sessionManager.commandExists("python3", null)) {
-				required.add("python");
-			}
-		}
-
-		// Check for .py files in command
-		if (command.contains(".py")) {
-			if (!sessionManager.commandExists("python", null) &&
-				!sessionManager.commandExists("python3", null)) {
-				required.add("python");
-			}
+			lowerCommand.contains("python ") || lowerCommand.contains("python3 ") ||
+			command.contains(".py")) {
+			required.add("python");
 		}
 
 		// Check for pip commands
 		if (lowerCommand.startsWith("pip") || lowerCommand.startsWith("pip3") ||
 			lowerCommand.contains("pip ") || lowerCommand.contains("pip3 ")) {
-			if (!sessionManager.commandExists("pip", null) &&
-				!sessionManager.commandExists("pip3", null)) {
-				required.add("python");  // Install Python which includes pip
-			}
+			required.add("python");
 		}
 
 		// Check for Node.js
 		if (lowerCommand.startsWith("node") || lowerCommand.contains("node ") ||
 			command.contains(".js") || command.contains("npm ") || command.contains("npx ")) {
-			if (!sessionManager.commandExists("node", null)) {
-				required.add("node");
-			}
+			required.add("node");
 		}
 
 		// Check for Git
 		if (lowerCommand.startsWith("git ") || lowerCommand.contains(" git ")) {
-			if (!sessionManager.commandExists("git", null)) {
-				required.add("git");
-			}
+			required.add("git");
 		}
 
 		// Check for Docker
 		if (lowerCommand.startsWith("docker") || lowerCommand.contains("docker ")) {
-			if (!sessionManager.commandExists("docker", null)) {
-				required.add("docker");
-			}
+			required.add("docker");
 		}
 
 		// Check for curl/wget (network tools)
 		if (lowerCommand.contains("curl ") || lowerCommand.contains("wget ")) {
-			if (!sessionManager.commandExists("curl", null)) {
-				required.add("curl");
-			}
+			required.add("curl");
 		}
 
 		return required;
 	}
 
-	private SmartShellResult formatResult(SmartShellSessionManager.SmartCommandResult result, String originalCommand) {
+	private SmartShellResult formatResult(SmartShellSessionManager.SmartCommandResult result, String originalCommand,
+			PermissionManager.PermissionResult permissionResult) {
 		SmartShellResult response = new SmartShellResult();
 		response.setCommand(originalCommand);
 		response.setExitCode(result.getExitCode());
@@ -1231,17 +1479,23 @@ public class SmartShellTool {
 		ErrorRecoveryStrategy.ErrorAnalysis analysis = result.getAnalysis();
 		response.setErrorType(analysis.getType().name());
 
-		// Add truncation info
+		// Add truncation info and sensitive command warnings
 		SmartShellSessionManager.CommandResult baseResult = result.getBaseResult();
 		List<String> warnings = new ArrayList<>();
 
+		// Add sensitive command warnings if applicable
+		if (permissionResult != null && permissionResult.isSensitiveCommand()
+				&& permissionResult.getSensitiveWarnings() != null) {
+			warnings.addAll(permissionResult.getSensitiveWarnings());
+		}
+
 		if (baseResult.isTruncatedByLines()) {
-			warnings.add(String.format("Output truncated at %d lines (total: %d)", sessionManager.getMaxOutputLines(),
-					baseResult.getTotalLines()));
+			warnings.add(String.format("Output truncated at %d lines (total: %d). Use 'head' or 'tail' to limit output.",
+					sessionManager.getMaxOutputLines(), baseResult.getTotalLines()));
 		}
 		if (baseResult.isTruncatedByBytes() && sessionManager.getMaxOutputBytes() != null) {
-			warnings.add(String.format("Output truncated at %d bytes (total: %d)", sessionManager.getMaxOutputBytes(),
-					baseResult.getTotalBytes()));
+			warnings.add(String.format("Output truncated at %d bytes (total: %d). Use 'head' or 'tail' to limit output.",
+					sessionManager.getMaxOutputBytes(), baseResult.getTotalBytes()));
 		}
 		if (result.isTimedOut()) {
 			warnings.add("Command timed out and was terminated");
@@ -1978,13 +2232,15 @@ public class SmartShellTool {
 
 		private BackgroundTaskManager backgroundTaskManager;
 
+		private WorkingDirectoryManager workingDirManager;
+
 		private List<String> startupCommands = new ArrayList<>();
 
 		private List<String> shutdownCommands = new ArrayList<>();
 
 		private long commandTimeout = 60000;
 
-		private int maxOutputLines = 1000;
+		private int maxOutputLines = 500;
 
 		private Long maxOutputBytes = null;
 
@@ -2000,8 +2256,20 @@ public class SmartShellTool {
 
 		private List<ShellEnvironment> preferredShells = new ArrayList<>();
 
+		private PermissionManager permissionManager = null;
+
 		public Builder(String workspaceRoot) {
 			this.workspaceRoot = workspaceRoot;
+		}
+
+		public Builder withPermissionManager(PermissionManager pm) {
+			this.permissionManager = pm;
+			return this;
+		}
+
+		public Builder withPermissions(List<String> allow, List<String> deny) {
+			this.permissionManager = PermissionManager.builder().allow(allow).deny(deny).build();
+			return this;
 		}
 
 		public Builder withStartupCommands(List<String> commands) {

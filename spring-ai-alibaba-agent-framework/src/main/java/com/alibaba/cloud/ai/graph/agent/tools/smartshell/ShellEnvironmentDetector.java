@@ -34,9 +34,11 @@ public class ShellEnvironmentDetector {
 	private static final Logger log = LoggerFactory.getLogger(ShellEnvironmentDetector.class);
 
 	// Priority constants - higher number = higher priority
-	private static final int PRIORITY_POWERSHELL = 100;
+	// On Windows: Git Bash > WSL > PowerShell > cmd (matching Claude Code behavior)
+	// On Unix/macOS: zsh > bash > sh
+	private static final int PRIORITY_GIT_BASH = 100;
 	private static final int PRIORITY_WSL = 90;
-	private static final int PRIORITY_GIT_BASH = 80;
+	private static final int PRIORITY_POWERSHELL = 80;
 	private static final int PRIORITY_BASH = 70;
 	private static final int PRIORITY_ZSH = 60;
 	private static final int PRIORITY_CMD = 50;
@@ -94,17 +96,17 @@ public class ShellEnvironmentDetector {
 	}
 
 	private void detectWindowsShells(List<ShellEnvironment> shells) {
-		// 1. PowerShell (preferred on Windows)
-		ShellEnvironment ps = detectPowerShell();
-		if (ps != null) shells.add(ps);
+		// 1. Git Bash (preferred on Windows - matches Claude Code behavior)
+		ShellEnvironment gitBash = detectGitBash();
+		if (gitBash != null) shells.add(gitBash);
 
-		// 2. WSL
+		// 2. WSL (full Linux environment, slower startup)
 		ShellEnvironment wsl = detectWsl();
 		if (wsl != null) shells.add(wsl);
 
-		// 3. Git Bash
-		ShellEnvironment gitBash = detectGitBash();
-		if (gitBash != null) shells.add(gitBash);
+		// 3. PowerShell (cross-platform, modern)
+		ShellEnvironment ps = detectPowerShell();
+		if (ps != null) shells.add(ps);
 
 		// 4. cmd.exe (fallback)
 		ShellEnvironment cmd = detectCmd();
@@ -189,10 +191,12 @@ public class ShellEnvironmentDetector {
 
 			if (finished && process.exitValue() == 0) {
 				log.debug("WSL is available and working");
+				// Use wsl -e to execute command directly with arguments
+				// This is better than 'wsl bash' because it properly handles paths and arguments
 				return ShellEnvironment.builder()
 					.type(ShellEnvironment.Type.WSL)
 					.executablePath("wsl")
-					.command(List.of("wsl", "bash"))
+					.command(List.of("wsl"))
 					.environment(System.getenv())
 					.available(true)
 					.priority(PRIORITY_WSL)

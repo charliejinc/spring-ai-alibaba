@@ -69,6 +69,11 @@ public class SmartEnvironmentManager {
 	public CommandStatus ensureCommandAvailable(String command, RunnableConfig config) {
 		String baseCommand = command.split("\\s+")[0];
 
+		// Skip check for shell built-in commands
+		if (isShellBuiltIn(baseCommand)) {
+			return CommandStatus.available(baseCommand);
+		}
+
 		// First check if command exists
 		if (executor.commandExists(baseCommand, config)) {
 			return CommandStatus.available(baseCommand);
@@ -84,6 +89,16 @@ public class SmartEnvironmentManager {
 
 		// Try to auto-install
 		return tryInstall(baseCommand, config);
+	}
+
+	/**
+	 * Check if command is a shell built-in that doesn't exist as an executable.
+	 */
+	private boolean isShellBuiltIn(String command) {
+		// Shell built-in commands - these don't have executable files
+		return Set.of("cd", "pwd", "echo", "export", "source", "alias", "bg", "fg", "jobs", "kill",
+				"read", "set", "shift", "trap", "unset", "test", "true", "false", "exit", "return",
+				"break", "continue", "declare", "local", "readonly", "typeset", "ulimit", "umask").contains(command.toLowerCase());
 	}
 
 	/**

@@ -83,6 +83,24 @@ public class SmartShellSessionManager {
 	}
 
 	/**
+	 * Get the current shell environment type.
+	 */
+	public ShellEnvironment.Type getCurrentShellType(RunnableConfig config) {
+		SmartShellSession session = (SmartShellSession) config.context().get(SESSION_INSTANCE_CONTEXT_KEY);
+		if (session != null) {
+			ShellEnvironment shell = session.getCurrentShell();
+			if (shell != null) {
+				return shell.getType();
+			}
+		}
+		// Fallback to primary shell
+		if (!availableShells.isEmpty()) {
+			return availableShells.get(0).getType();
+		}
+		return null;
+	}
+
+	/**
 	 * Initialize shell session with the best available shell.
 	 */
 	public void initialize(RunnableConfig config) {
@@ -454,7 +472,10 @@ public class SmartShellSessionManager {
 			}
 		}
 
-		ShellEnvironment getCurrentShell() {
+		/**
+		 * Get the current shell environment.
+		 */
+		public ShellEnvironment getCurrentShell() {
 			return currentShell;
 		}
 
@@ -491,11 +512,11 @@ public class SmartShellSessionManager {
 			pb.redirectErrorStream(false);
 
 			process = pb.start();
-			stdin = new BufferedWriter(new OutputStreamWriter(process.getOutputStream()));
+			stdin = new BufferedWriter(EncodingUtils.createOutputStreamWriter(process.getOutputStream()));
 
 			// Start stdout reader
 			new Thread(() -> {
-				try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+				try (BufferedReader reader = new BufferedReader(EncodingUtils.createInputStreamReader(process.getInputStream()))) {
 					String line;
 					while ((line = reader.readLine()) != null) {
 						outputQueue.offer(new OutputLine("stdout", line));
@@ -509,7 +530,7 @@ public class SmartShellSessionManager {
 
 			// Start stderr reader
 			new Thread(() -> {
-				try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getErrorStream()))) {
+				try (BufferedReader reader = new BufferedReader(EncodingUtils.createInputStreamReader(process.getErrorStream()))) {
 					String line;
 					while ((line = reader.readLine()) != null) {
 						outputQueue.offer(new OutputLine("stderr", line));
@@ -532,8 +553,10 @@ public class SmartShellSessionManager {
 				throw new IllegalStateException("Shell session is not running");
 			}
 
-			// If cwd or env is specified, we need to create a one-off process
-			if ((cwd != null && !cwd.isEmpty()) || (env != null && !env.isEmpty())) {
+			// If cwd or env is specified, or if using WSL, we need to create a one-off process
+			// WSL doesn't work well with interactive shell, use wsl <command> directly
+			if ((cwd != null && !cwd.isEmpty()) || (env != null && !env.isEmpty())
+					|| shellEnv.getType() == ShellEnvironment.Type.WSL) {
 				return executeWithTempSettings(command, timeoutMs, maxOutputLines, maxOutputBytes, cwd, env);
 			}
 
@@ -568,28 +591,36 @@ public class SmartShellSessionManager {
 		CommandResult executeWithTempSettings(String command, long timeoutMs, int maxOutputLines, Long maxOutputBytes,
 											  String cwd, Map<String, String> env) {
 			try {
-				ProcessBuilder pb = new ProcessBuilder(shellEnv.getCommand());
+				ProcessBuilder pb;
 
-				// Set working directory
-				if (cwd != null && !cwd.isEmpty()) {
-					pb.directory(new java.io.File(cwd));
+				// For WSL, use wsl -e bash -c 'command' format to properly execute commands
+				if (shellEnv.getType() == ShellEnvironment.Type.WSL) {
+					pb = new ProcessBuilder("wsl", "-e", "bash", "-c", command);
 				} else {
-					pb.directory(workspace.toFile());
+					pb = new ProcessBuilder(shellEnv.getCommand());
+
+					// Set working directory
+					if (cwd != null && !cwd.isEmpty()) {
+						pb.directory(new java.io.File(cwd));
+					} else {
+						pb.directory(workspace.toFile());
+					}
+
+					// Merge environment variables
+					Map<String, String> mergedEnv = new HashMap<>(shellEnv.getEnvironment());
+					if (env != null) {
+						mergedEnv.putAll(env);
+					}
+					pb.environment().putAll(mergedEnv);
 				}
 
-				// Merge environment variables
-				Map<String, String> mergedEnv = new HashMap<>(shellEnv.getEnvironment());
-				if (env != null) {
-					mergedEnv.putAll(env);
-				}
-				pb.environment().putAll(mergedEnv);
 				pb.redirectErrorStream(true);
 
 				// Execute the command
 				Process tempProcess = pb.start();
 
 				// Write command to stdin
-				try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(tempProcess.getOutputStream()))) {
+				try (BufferedWriter writer = new BufferedWriter(EncodingUtils.createOutputStreamWriter(tempProcess.getOutputStream()))) {
 					writer.write(command);
 					if (!command.endsWith("\n")) {
 						writer.write("\n");
@@ -603,7 +634,7 @@ public class SmartShellSessionManager {
 				StringBuilder output = new StringBuilder();
 				boolean finished = tempProcess.waitFor(timeoutMs, TimeUnit.MILLISECONDS);
 
-				try (BufferedReader reader = new BufferedReader(new InputStreamReader(tempProcess.getInputStream()))) {
+				try (BufferedReader reader = new BufferedReader(EncodingUtils.createInputStreamReader(tempProcess.getInputStream()))) {
 					String line;
 					int lineCount = 0;
 					long byteCount = 0;
