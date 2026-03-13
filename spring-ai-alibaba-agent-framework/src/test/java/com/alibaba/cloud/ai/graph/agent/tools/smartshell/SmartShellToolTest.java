@@ -612,4 +612,45 @@ class SmartShellToolTest {
 		return "ls";
 	}
 
+	@Test
+	void testPythonScriptExecution() throws Exception {
+		SmartShellTool tool = SmartShellTool.builder(tempDir.toString())
+			.withAutoFix(false)
+			.withTryAlternativeShells(false)
+			.withAutoInstall(false)  // Disable auto-install
+			.build();
+
+		tool.getSessionManager().initialize(config);
+
+		try {
+			// First, check if python is available
+			SmartShellTool.CommandAvailableResult result = tool.checkCommandAvailable("python", toolContext);
+			System.out.println("Python available: " + result.isAvailable());
+			System.out.println("Python message: " + result.getMessage());
+
+			// Create test script file directly using Java
+			Path scriptPath = tempDir.resolve("test_script.py");
+			java.nio.file.Files.writeString(scriptPath, "print(\"Hello from Python!\")\nprint(\"Test completed!\")\n");
+
+			// Execute Python script using absolute path
+			// PathUtils will automatically convert to appropriate format for the shell
+			String scriptPathStr = scriptPath.toString();
+			SmartShellTool.SmartShellResult execResult = tool.executeShellCommand("python " + scriptPathStr, false, false, false,
+					toolContext);
+
+			assertNotNull(execResult);
+			System.out.println("Python script output: " + execResult.getOutput());
+			System.out.println("Python script success: " + execResult.isSuccess());
+
+			// Verify output contains expected strings
+			assertTrue(execResult.isSuccess(), "Python script should execute successfully");
+			assertTrue(execResult.getOutput().contains("Hello from Python!"), "Output should contain Hello from Python!");
+			assertTrue(execResult.getOutput().contains("Test completed!"), "Output should contain Test completed!");
+
+		}
+		finally {
+			tool.getSessionManager().cleanup(config);
+		}
+	}
+
 }

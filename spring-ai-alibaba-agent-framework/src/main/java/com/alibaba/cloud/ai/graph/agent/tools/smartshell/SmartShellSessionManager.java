@@ -659,11 +659,14 @@ public class SmartShellSessionManager {
 				throw new IllegalStateException("Shell session is not running");
 			}
 
+			// Convert paths in command to appropriate format for the target shell
+			String processedCommand = PathUtils.convertPathsInCommand(command, shellEnv.getType());
+
 			// If cwd or env is specified, or if using WSL, we need to create a one-off process
 			// WSL doesn't work well with interactive shell, use wsl <command> directly
 			if ((cwd != null && !cwd.isEmpty()) || (env != null && !env.isEmpty())
 					|| shellEnv.getType() == ShellEnvironment.Type.WSL) {
-				return executeWithTempSettings(command, timeoutMs, maxOutputLines, maxOutputBytes, cwd, env);
+				return executeWithTempSettings(processedCommand, timeoutMs, maxOutputLines, maxOutputBytes, cwd, env);
 			}
 
 			String marker = DONE_MARKER_PREFIX + UUID.randomUUID().toString().replace("-", "");
@@ -672,9 +675,9 @@ public class SmartShellSessionManager {
 			try {
 				outputQueue.clear();
 
-				// Send command
-				stdin.write(command);
-				if (!command.endsWith("\n")) {
+				// Send command (use processedCommand with converted paths)
+				stdin.write(processedCommand);
+				if (!processedCommand.endsWith("\n")) {
 					stdin.write("\n");
 				}
 
@@ -701,13 +704,31 @@ public class SmartShellSessionManager {
 				String osName = System.getProperty("os.name").toLowerCase();
 				boolean isWindows = osName.contains("windows");
 
+				// Convert paths in command to appropriate format for the target shell
+				String processedCommand = PathUtils.convertPathsInCommand(command, shellEnv.getType());
+
 				// For WSL, use wsl -e bash -c 'command' format to properly execute commands
 				if (shellEnv.getType() == ShellEnvironment.Type.WSL) {
-					pb = new ProcessBuilder("wsl", "-e", "bash", "-c", command);
+					pb = new ProcessBuilder("wsl", "-e", "bash", "-c", processedCommand);
 				} else if (isWindows && shellEnv.getType() == ShellEnvironment.Type.GIT_BASH) {
-					// On Windows with Git Bash, use cmd /c to execute the command directly
-					// This ensures we use the Windows PATH which includes Python and other Windows-installed programs
-					pb = new ProcessBuilder("cmd", "/c", command);
+					// On Windows with Git Bash, use Git Bash to execute commands
+					// The command is passed directly to bash -c
+					pb = new ProcessBuilder(shellEnv.getExecutablePath(), "-c", processedCommand);
+
+					// Set working directory
+					if (cwd != null && !cwd.isEmpty()) {
+						// Convert cwd to Windows format for ProcessBuilder
+						pb.directory(new java.io.File(PathUtils.normalizePath(cwd)));
+					} else {
+						pb.directory(workspace.toFile());
+					}
+
+					// Merge environment variables - include Windows PATH for accessing Windows programs
+					Map<String, String> mergedEnv = new HashMap<>(shellEnv.getEnvironment());
+					if (env != null) {
+						mergedEnv.putAll(env);
+					}
+					pb.environment().putAll(mergedEnv);
 				} else {
 					pb = new ProcessBuilder(shellEnv.getCommand());
 
@@ -739,19 +760,20 @@ public class SmartShellSessionManager {
 				// Execute the command
 				Process tempProcess = pb.start();
 
-				// Write command to stdin (only for interactive shells, not for cmd /c)
-				try (BufferedWriter writer = new BufferedWriter(EncodingUtils.createOutputStreamWriter(tempProcess.getOutputStream()))) {
-					writer.write(command);
-					if (!command.endsWith("\n")) {
-						writer.write("\n");
-					}
-					// For cmd /c, we don't need to write exit - it auto-exits after command
-					// For interactive shells, we need to write exit
-					if (!(isWindows && shellEnv.getType() == ShellEnvironment.Type.GIT_BASH)) {
+				// Write command to stdin only for interactive shells
+				// For shells using -c parameter (WSL, Git Bash with -c), skip stdin writing
+				boolean useCommandLine = shellEnv.getType() == ShellEnvironment.Type.WSL ||
+						(isWindows && shellEnv.getType() == ShellEnvironment.Type.GIT_BASH);
+				if (!useCommandLine) {
+					try (BufferedWriter writer = new BufferedWriter(EncodingUtils.createOutputStreamWriter(tempProcess.getOutputStream()))) {
+						writer.write(processedCommand);
+						if (!processedCommand.endsWith("\n")) {
+							writer.write("\n");
+						}
 						writer.write("exit");
 						writer.write("\n");
+						writer.flush();
 					}
-					writer.flush();
 				}
 
 				// Read output
