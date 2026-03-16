@@ -1469,6 +1469,23 @@ public class SmartShellTool {
 			required.add("curl");
 		}
 
+		// Check for Java
+		if (lowerCommand.startsWith("java ") || lowerCommand.contains("java -") ||
+			command.contains(".jar") || command.contains(".class")) {
+			required.add("java");
+		}
+
+		// Check for Maven
+		if (lowerCommand.startsWith("mvn ") || lowerCommand.contains("mvn ")) {
+			required.add("mvn");
+		}
+
+		// Check for Gradle
+		if (lowerCommand.startsWith("gradle ") || lowerCommand.contains("gradle ") ||
+			lowerCommand.startsWith("./gradlew") || lowerCommand.contains("./gradlew ")) {
+			required.add("gradle");
+		}
+
 		return required;
 	}
 

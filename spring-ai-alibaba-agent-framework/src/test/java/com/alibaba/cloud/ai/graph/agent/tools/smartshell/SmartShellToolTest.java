@@ -613,6 +613,35 @@ class SmartShellToolTest {
 	}
 
 	@Test
+	void testPythonCommandAlternatives() throws Exception {
+		// Test that python command is recognized even when only python3 is available
+		SmartShellTool tool = SmartShellTool.builder(tempDir.toString())
+			.withAutoFix(false)
+			.withTryAlternativeShells(false)
+			.withAutoInstall(false)  // Disable auto-install
+			.build();
+
+		tool.getSessionManager().initialize(config);
+
+		try {
+			// Test ensure command for python - should find python even if only python3 exists
+			SmartShellTool.EnsureResult result = tool.ensure("python", false, toolContext);
+
+			assertNotNull(result);
+			// Python should be available (either as 'python' or 'python3')
+			assertTrue(result.isAvailable(),
+				"Python should be available (either as 'python' or 'python3'). Message: " + result.getMessage());
+
+			System.out.println("Python ensure result: " + result.getMessage());
+			System.out.println("Python was installed: " + result.isInstalled());
+
+		}
+		finally {
+			tool.getSessionManager().cleanup(config);
+		}
+	}
+
+	@Test
 	void testPythonScriptExecution() throws Exception {
 		SmartShellTool tool = SmartShellTool.builder(tempDir.toString())
 			.withAutoFix(false)

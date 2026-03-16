@@ -79,6 +79,43 @@ public class SmartEnvironmentManager {
 			return CommandStatus.available(baseCommand);
 		}
 
+		// Special handling for commands with alternatives: try them before failing
+		if (isPythonCommand(baseCommand)) {
+			if (checkPythonAlternatives(config)) {
+				return CommandStatus.available(baseCommand);
+			}
+		}
+
+		if (isNodeCommand(baseCommand)) {
+			if (checkNodeAlternatives(config)) {
+				return CommandStatus.available(baseCommand);
+			}
+		}
+
+		if (isJavaCommand(baseCommand)) {
+			if (checkJavaAlternatives(config)) {
+				return CommandStatus.available(baseCommand);
+			}
+		}
+
+		if (isMavenCommand(baseCommand)) {
+			if (checkMavenAlternatives(config)) {
+				return CommandStatus.available(baseCommand);
+			}
+		}
+
+		if (isDownloadToolCommand(baseCommand)) {
+			if (checkDownloadToolAlternatives(config)) {
+				return CommandStatus.available(baseCommand);
+			}
+		}
+
+		if (isGradleCommand(baseCommand)) {
+			if (checkGradleAlternatives(config)) {
+				return CommandStatus.available(baseCommand);
+			}
+		}
+
 		// Command not found - get installation suggestion
 		String suggestion = executor.getInstallSuggestion(baseCommand);
 		log.warn("Command '{}' not found. Suggestion: {}", baseCommand, suggestion);
@@ -89,6 +126,159 @@ public class SmartEnvironmentManager {
 
 		// Try to auto-install
 		return tryInstall(baseCommand, config);
+	}
+
+	/**
+	 * Check if the command is a Python-related command.
+	 */
+	private boolean isPythonCommand(String command) {
+		return command.equalsIgnoreCase("python") ||
+			   command.equalsIgnoreCase("python3") ||
+			   command.equalsIgnoreCase("py");
+	}
+
+	/**
+	 * Check for Python command alternatives.
+	 * On Windows: python, python3, py
+	 * On Unix: python3, python
+	 */
+	private boolean checkPythonAlternatives(RunnableConfig config) {
+		String[] alternatives;
+		if (platform == Platform.WINDOWS) {
+			// Windows: try python3, py, python in order
+			alternatives = new String[]{"python3", "py", "python"};
+		}
+		else {
+			// Unix/Linux/Mac: try python3, python in order
+			alternatives = new String[]{"python3", "python"};
+		}
+
+		for (String alt : alternatives) {
+			if (executor.commandExists(alt, config)) {
+				log.debug("Found Python alternative: {}", alt);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Check if the command is a Node.js-related command.
+	 */
+	private boolean isNodeCommand(String command) {
+		return command.equalsIgnoreCase("node") ||
+			   command.equalsIgnoreCase("nodejs");
+	}
+
+	/**
+	 * Check for Node.js command alternatives.
+	 * Some Linux distributions (e.g., Ubuntu/Debian) use 'nodejs' instead of 'node'
+	 */
+	private boolean checkNodeAlternatives(RunnableConfig config) {
+		String[] alternatives = {"node", "nodejs"};
+
+		for (String alt : alternatives) {
+			if (executor.commandExists(alt, config)) {
+				log.debug("Found Node.js alternative: {}", alt);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Check if the command is a Java-related command.
+	 */
+	private boolean isJavaCommand(String command) {
+		return command.equalsIgnoreCase("java") ||
+			   command.equalsIgnoreCase("javac");
+	}
+
+	/**
+	 * Check for Java command alternatives.
+	 * Try different Java version commands if standard ones don't exist.
+	 */
+	private boolean checkJavaAlternatives(RunnableConfig config) {
+		String[] alternatives = {"java", "java11", "java17", "java21"};
+
+		for (String alt : alternatives) {
+			if (executor.commandExists(alt, config)) {
+				log.debug("Found Java alternative: {}", alt);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Check if the command is Maven.
+	 */
+	private boolean isMavenCommand(String command) {
+		return command.equalsIgnoreCase("mvn") ||
+			   command.equalsIgnoreCase("maven");
+	}
+
+	/**
+	 * Check for Maven command alternatives.
+	 */
+	private boolean checkMavenAlternatives(RunnableConfig config) {
+		String[] alternatives = {"mvn", "mvn.cmd", "mvnw", "mvnw.cmd"};
+
+		for (String alt : alternatives) {
+			if (executor.commandExists(alt, config)) {
+				log.debug("Found Maven alternative: {}", alt);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Check if the command is a network download tool.
+	 */
+	private boolean isDownloadToolCommand(String command) {
+		return command.equalsIgnoreCase("curl") ||
+			   command.equalsIgnoreCase("wget");
+	}
+
+	/**
+	 * Check for download tool alternatives.
+	 * curl and wget are functionally similar - if one exists, the other may not be needed.
+	 */
+	private boolean checkDownloadToolAlternatives(RunnableConfig config) {
+		String[] alternatives = {"curl", "wget"};
+
+		for (String alt : alternatives) {
+			if (executor.commandExists(alt, config)) {
+				log.debug("Found download tool alternative: {}", alt);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Check if the command is Gradle.
+	 */
+	private boolean isGradleCommand(String command) {
+		return command.equalsIgnoreCase("gradle") ||
+			   command.equalsIgnoreCase("gradlew");
+	}
+
+	/**
+	 * Check for Gradle command alternatives.
+	 * Try system gradle or wrapper.
+	 */
+	private boolean checkGradleAlternatives(RunnableConfig config) {
+		String[] alternatives = {"gradle", "./gradlew", "gradlew.bat", "gradlew"};
+
+		for (String alt : alternatives) {
+			if (executor.commandExists(alt, config)) {
+				log.debug("Found Gradle alternative: {}", alt);
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
