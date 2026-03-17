@@ -49,6 +49,9 @@ public class SmartShellSessionManager {
 	private final boolean autoFixEnabled;
 	private final boolean tryAlternativeShells;
 	private final List<ShellEnvironment> availableShells;
+	private final boolean timeoutRetryEnabled;
+	private final int timeoutMaxRetries;
+	private final long timeoutRetryDelayMs;
 
 	private final ShellEnvironmentDetector detector;
 
@@ -65,6 +68,9 @@ public class SmartShellSessionManager {
 		this.environment = new HashMap<>(builder.environment);
 		this.autoFixEnabled = builder.autoFixEnabled;
 		this.tryAlternativeShells = builder.tryAlternativeShells;
+		this.timeoutRetryEnabled = builder.timeoutRetryEnabled;
+		this.timeoutMaxRetries = builder.timeoutMaxRetries;
+		this.timeoutRetryDelayMs = builder.timeoutRetryDelayMs;
 		this.detector = new ShellEnvironmentDetector();
 		this.availableShells = new ArrayList<>(builder.preferredShells);
 
@@ -212,14 +218,19 @@ public class SmartShellSessionManager {
 
 		log.info("Executing command: {} (cwd={}, timeout={}ms)", command, cwd != null ? cwd : "default", effectiveTimeout);
 
-		// Execute the command with cwd and env
-		CommandResult result = session.execute(command, effectiveTimeout, maxOutputLines, maxOutputBytes, cwd, env);
+		// Execute the command with timeout retry logic
+		CommandResult result = executeWithTimeoutRetry(session, command, effectiveTimeout, cwd, env);
 
 		// Analyze the result
 		ErrorRecoveryStrategy analyzer = new ErrorRecoveryStrategy(session.getCurrentShell());
 		ErrorRecoveryStrategy.ErrorAnalysis analysis = analyzer.analyze(command, result.getOutput(), result.getExitCode());
 
 		SmartCommandResult smartResult = new SmartCommandResult(result, analysis);
+
+		// If command timed out but retry succeeded, mark it
+		if (result.isSuccess() && smartResult.wasRetried()) {
+			smartResult.setRetryCount(smartResult.getRetryCount());
+		}
 
 		// If command failed and auto-fix is enabled, try to recover
 		if (!result.isSuccess() && attemptAutoFix && analysis.isRecoverable()) {
@@ -255,6 +266,56 @@ public class SmartShellSessionManager {
 		}
 
 		return smartResult;
+	}
+
+	/**
+	 * Execute command with automatic retry on timeout.
+	 * Uses exponential backoff between retries.
+	 */
+	private CommandResult executeWithTimeoutRetry(SmartShellSession session, String command, long timeoutMs,
+												  String cwd, Map<String, String> env) {
+		if (!timeoutRetryEnabled || timeoutMaxRetries <= 0) {
+			return session.execute(command, timeoutMs, maxOutputLines, maxOutputBytes, cwd, env);
+		}
+
+		int retryCount = 0;
+		long currentDelay = timeoutRetryDelayMs;
+
+		while (true) {
+			CommandResult result = session.execute(command, timeoutMs, maxOutputLines, maxOutputBytes, cwd, env);
+
+			// If succeeded or not a timeout, return result
+			if (!result.isTimedOut()) {
+				if (retryCount > 0) {
+					result.setRetryCount(retryCount);
+				}
+				return result;
+			}
+
+			// Command timed out
+			retryCount++;
+
+			if (retryCount > timeoutMaxRetries) {
+				log.warn("Command timed out after {} retries", timeoutMaxRetries);
+				result.setRetryCount(retryCount);
+				return result;
+			}
+
+			log.info("Command timed out, waiting {}ms before retry {}/{}", currentDelay, retryCount, timeoutMaxRetries);
+
+			try {
+				Thread.sleep(currentDelay);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				break;
+			}
+
+			// Exponential backoff
+			currentDelay = currentDelay * 2;
+		}
+
+		// Return last result if interrupted
+		return session.execute(command, timeoutMs, maxOutputLines, maxOutputBytes, cwd, env);
 	}
 
 	/**
@@ -957,6 +1018,10 @@ public class SmartShellSessionManager {
 		public String getAlternativeCommand() { return alternativeCommand; }
 		public void setAlternativeCommand(String alternativeCommand) { this.alternativeCommand = alternativeCommand; }
 
+		public int getRetryCount() { return baseResult.getRetryCount(); }
+		public void setRetryCount(int count) { baseResult.setRetryCount(count); }
+		public boolean wasRetried() { return baseResult.wasRetried(); }
+
 		public boolean isSuccess() {
 			return baseResult.isSuccess();
 		}
@@ -999,6 +1064,7 @@ public class SmartShellSessionManager {
 		private final boolean truncatedByBytes;
 		private final int totalLines;
 		private final long totalBytes;
+		private int retryCount = 0;
 
 		public CommandResult(String output, Integer exitCode, boolean timedOut,
 							 boolean truncatedByLines, boolean truncatedByBytes,
@@ -1019,6 +1085,9 @@ public class SmartShellSessionManager {
 		public boolean isTruncatedByBytes() { return truncatedByBytes; }
 		public int getTotalLines() { return totalLines; }
 		public long getTotalBytes() { return totalBytes; }
+		public int getRetryCount() { return retryCount; }
+		public void setRetryCount(int count) { this.retryCount = count; }
+		public boolean wasRetried() { return retryCount > 0; }
 
 		public boolean isSuccess() {
 			return !timedOut && (exitCode == null || exitCode == 0);
@@ -1041,6 +1110,11 @@ public class SmartShellSessionManager {
 		private boolean autoFixEnabled = true;
 		private boolean tryAlternativeShells = true;
 		private List<ShellEnvironment> preferredShells = new ArrayList<>();
+
+		// Timeout retry configuration
+		private boolean timeoutRetryEnabled = true;
+		private int timeoutMaxRetries = 2;
+		private long timeoutRetryDelayMs = 5000; // 5 seconds initial delay
 
 		public Builder workspaceRoot(String path) {
 			this.workspaceRoot = Path.of(path);
@@ -1119,6 +1193,21 @@ public class SmartShellSessionManager {
 
 		public Builder preferredShells(List<ShellEnvironment> shells) {
 			this.preferredShells.addAll(shells);
+			return this;
+		}
+
+		public Builder timeoutRetryEnabled(boolean enabled) {
+			this.timeoutRetryEnabled = enabled;
+			return this;
+		}
+
+		public Builder timeoutMaxRetries(int maxRetries) {
+			this.timeoutMaxRetries = maxRetries;
+			return this;
+		}
+
+		public Builder timeoutRetryDelayMs(long delayMs) {
+			this.timeoutRetryDelayMs = delayMs;
 			return this;
 		}
 

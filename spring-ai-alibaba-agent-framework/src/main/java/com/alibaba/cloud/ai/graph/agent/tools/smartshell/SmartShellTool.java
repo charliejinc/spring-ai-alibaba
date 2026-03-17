@@ -87,6 +87,7 @@ public class SmartShellTool {
 		For long-running commands, output may be truncated (default: 500 lines or 1MB).
 		Use 'command | head -N' or 'command | tail -N' to limit output.
 		Commands exceeding the timeout will be terminated and the session restarted.
+		Use the timeout parameter to specify a custom timeout (in milliseconds, max: 600000).
 
 		Security: Potentially dangerous commands (rm -rf, curl | bash, sudo, etc.) will trigger warnings.
 		""";
@@ -137,12 +138,16 @@ public class SmartShellTool {
 		@ToolParam(description = "Restart the shell session before executing (default: false).", required = false) Boolean restart,
 		@ToolParam(description = "Enable auto-fix for this command (overrides default).", required = false) Boolean enableAutoFix,
 		@ToolParam(description = "Try alternative shells if command fails (default: true).", required = false) Boolean tryAlternatives,
+		@ToolParam(description = "Timeout in milliseconds (default: 60000, max: 600000). Use for long-running commands.", required = false) Long timeout,
 		ToolContext toolContext) { // @formatter:on
 
 		PermissionManager.PermissionResult permissionResult = null;
 
 		try {
 			RunnableConfig config = (RunnableConfig) toolContext.getContext().get(AGENT_CONFIG_CONTEXT_KEY);
+
+			// Calculate effective timeout
+			long effectiveTimeout = timeout != null ? Math.min(timeout, 600000) : 60000;
 
 			// Handle restart request
 			if (Boolean.TRUE.equals(restart)) {
@@ -230,7 +235,7 @@ public class SmartShellTool {
 
 			// Execute with error analysis and recovery
 			SmartShellSessionManager.SmartCommandResult result = sessionManager.executeCommand(command, config,
-					shouldAutoFix);
+					shouldAutoFix, null, null, effectiveTimeout);
 
 			// Format the result
 			return formatResult(result, command, permissionResult);
@@ -2278,6 +2283,11 @@ public class SmartShellTool {
 
 		private List<ShellEnvironment> preferredShells = new ArrayList<>();
 
+		// Timeout retry configuration
+		private boolean timeoutRetryEnabled = true;
+		private int timeoutMaxRetries = 2;
+		private long timeoutRetryDelayMs = 5000;
+
 		private PermissionManager permissionManager = null;
 
 		public Builder(String workspaceRoot) {
@@ -2359,6 +2369,21 @@ public class SmartShellTool {
 			return this;
 		}
 
+		public Builder withTimeoutRetryEnabled(boolean enabled) {
+			this.timeoutRetryEnabled = enabled;
+			return this;
+		}
+
+		public Builder withTimeoutMaxRetries(int maxRetries) {
+			this.timeoutMaxRetries = maxRetries;
+			return this;
+		}
+
+		public Builder withTimeoutRetryDelayMs(long delayMs) {
+			this.timeoutRetryDelayMs = delayMs;
+			return this;
+		}
+
 		public SmartShellTool build() {
 			if (sessionManager == null) {
 				SmartShellSessionManager.Builder smBuilder = SmartShellSessionManager.builder()
@@ -2383,6 +2408,11 @@ public class SmartShellTool {
 				if (!preferredShells.isEmpty()) {
 					smBuilder.preferredShells(preferredShells);
 				}
+
+				// Timeout retry configuration
+				smBuilder.timeoutRetryEnabled(timeoutRetryEnabled)
+					.timeoutMaxRetries(timeoutMaxRetries)
+					.timeoutRetryDelayMs(timeoutRetryDelayMs);
 
 				this.sessionManager = smBuilder.build();
 			}
