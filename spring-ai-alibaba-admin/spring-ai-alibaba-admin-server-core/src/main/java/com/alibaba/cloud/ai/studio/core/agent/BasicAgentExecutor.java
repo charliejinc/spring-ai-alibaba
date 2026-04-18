@@ -16,6 +16,11 @@
 
 package com.alibaba.cloud.ai.studio.core.agent;
 
+import com.alibaba.cloud.ai.graph.advisors.SkillPromptAugmentAdvisor;
+import com.alibaba.cloud.ai.graph.agent.hook.skills.ReadSkillTool;
+import com.alibaba.cloud.ai.graph.skills.SkillMetadata;
+import com.alibaba.cloud.ai.graph.skills.registry.SkillRegistry;
+import com.alibaba.cloud.ai.graph.skills.registry.filesystem.FileSystemSkillRegistry;
 import com.alibaba.cloud.ai.studio.runtime.domain.chat.ChatMessage;
 import com.alibaba.cloud.ai.studio.runtime.domain.chat.ContentType;
 import com.alibaba.cloud.ai.studio.runtime.domain.chat.MessageRole;
@@ -49,7 +54,7 @@ import com.alibaba.cloud.ai.studio.core.agent.tool.ToolArgumentsHelper;
 import com.alibaba.cloud.ai.studio.core.rag.DocumentChunkConverter;
 import com.alibaba.cloud.ai.studio.core.utils.io.FileUtils;
 import com.alibaba.cloud.ai.studio.core.utils.common.IdGenerator;
-import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.client.ChatClient;
@@ -62,6 +67,7 @@ import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
+import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.chat.prompt.SystemPromptTemplate;
 import org.springframework.ai.content.Media;
@@ -73,6 +79,7 @@ import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.ai.rag.retrieval.search.DocumentRetriever;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
+import org.springframework.ai.tool.definition.ToolDefinition;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.Resource;
@@ -83,6 +90,7 @@ import org.springframework.util.CollectionUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.*;
@@ -101,7 +109,7 @@ import static org.springframework.ai.chat.memory.ChatMemory.CONVERSATION_ID;
  */
 @Service()
 @Qualifier("basicAgentExecutor")
-@RequiredArgsConstructor
+@Slf4j
 public class BasicAgentExecutor extends AbstractAgentExecutor {
 
 	/** Service for executing tools */
@@ -131,7 +139,28 @@ public class BasicAgentExecutor extends AbstractAgentExecutor {
 	/** Manager for file operations */
 	private final FileManager fileManager;
 
-	/**
+    public BasicAgentExecutor(ToolExecutionService toolExecutionService,
+                              PluginService pluginService,
+                              McpServerService mcpServerService,
+                              AppComponentManager appComponentManager,
+                              DocumentRetrieverManager documentRetrieverManager,
+                              ChatMemory chatMemory,
+                              CommonConfig commonConfig,
+                              ModelFactory modelFactory,
+                              @Qualifier("AiFileManager") FileManager fileManager) {
+        this.toolExecutionService = toolExecutionService;
+        this.pluginService = pluginService;
+        this.mcpServerService = mcpServerService;
+        this.appComponentManager = appComponentManager;
+        this.documentRetrieverManager = documentRetrieverManager;
+        this.chatMemory = chatMemory;
+        this.commonConfig = commonConfig;
+        this.modelFactory = modelFactory;
+        this.fileManager = fileManager;
+
+    }
+
+    /**
 	 * Executes the agent request in streaming mode
 	 * @param context The agent context
 	 * @param request The agent request
@@ -147,21 +176,19 @@ public class BasicAgentExecutor extends AbstractAgentExecutor {
 		ToolCallingChatOptions chatOptions = buildChatOptions(config);
 
 		// build tool callback provider
-		ToolCallingManager toolCallingManager = ToolCallingManager.builder().build();
+    	ToolCallingManager toolCallingManager = ToolCallingManager.builder().build();
 		CompositeToolCallbackProvider toolCallbackProvider = buildToolCallbackProvider(config, request.getExtraPrams());
-
 		// build messages
 		List<Message> messages = buildMessages(context);
-
 		// build chat client
 		ChatClient.Builder chatClientBuilder = buildChatClient(context, chatOptions, toolCallbackProvider);
-
 		final Prompt prompt = new Prompt(messages, chatOptions);
 		return chatClientBuilder.build()
 			.prompt(prompt)
 			.stream()
 			.chatResponse()
-			.concatMap(response -> processToolCallsRecursively(chatClientBuilder, response, prompt, toolCallingManager,
+			.concatMap(response ->
+                    processToolCallsRecursively(chatClientBuilder, response, prompt, toolCallingManager,
 					toolCallbackProvider, requestContext, chatOptions));
 	}
 
@@ -267,6 +294,13 @@ public class BasicAgentExecutor extends AbstractAgentExecutor {
 
 		// Add chat memory advisor
 		ChatClient.Builder chatClientBuilder = chatClient.mutate();
+
+        // Build skill components (shared between advisor and tool callback)
+        String skillsDir = config.getFileWorkspace()+ "skills";
+        SkillComponents skillComponents = buildSkillComponents(skillsDir, null);
+        log.info("=== Loaded {} Skills ===", skillComponents.advisor.getSkillCount());
+        skillComponents.advisor.listSkills().forEach(skill -> log.info("  - {}: {}", skill.getName(), skill.getDescription()));
+
 		if (context.isMemoryEnabled()) {
 			MessageChatMemoryAdvisor advisor = MessageChatMemoryAdvisor.builder(chatMemory).build();
 			int dialogRound = config.getMemory().getDialogRound();
@@ -292,14 +326,26 @@ public class BasicAgentExecutor extends AbstractAgentExecutor {
 			chatClientBuilder.defaultAdvisors(retrievalAdvisor);
 		}
 
-		// Add tool callbacks
+		// Add skill advisor for Skill prompt augmentation
+		chatClientBuilder.defaultAdvisors(skillComponents.advisor);
+
+        // Add tool callbacks
 		ToolCallback[] toolCallbacks = toolCallbackProvider.getToolCallbacks();
-		if (!ArrayUtils.isEmpty(toolCallbacks)) {
-			chatOptions = chatOptions.copy();
-			chatOptions.setToolCallbacks(Arrays.stream(toolCallbacks).toList());
+        // Register ReadSkillTool so LLM can call read_skill to read full Skill content
+        List<ToolCallback> toolCallbackList = new ArrayList<>();
+        if (!ArrayUtils.isEmpty(toolCallbacks)) {
+            toolCallbackList.addAll(Arrays.asList(toolCallbacks));
+        }
+        if (skillComponents.readSkillToolCallback != null) {
+            toolCallbackList.add(skillComponents.readSkillToolCallback);
+        }
+		if (!toolCallbackList.isEmpty()) {
+			chatOptions.setToolCallbacks(toolCallbackList);
 		}
 
-		return chatClientBuilder;
+
+
+        return chatClientBuilder;
 	}
 
 	/**
@@ -399,9 +445,60 @@ public class BasicAgentExecutor extends AbstractAgentExecutor {
 			context.setPromptVariables(map);
 			return new SystemMessage(instructions);
 		}
+		// Escape template expressions containing non-ASCII characters to avoid StringTemplate parsing errors
+		instructions = escapeChineseTemplateExpressions(instructions);
+		// Remove template expressions referencing non-existent variables to avoid errors when map misses keys
+		instructions = removeMissingVariableExpressions(instructions, map);
 
 		return new SystemPromptTemplate(instructions).createMessage(map);
 	}
+
+	/**
+	 * Escape template expressions containing non-ASCII characters (e.g. Chinese) to avoid StringTemplate parsing them as variables.
+	 * Example: <请输入你的主题> -> \<请输入你的主题>
+	 * Example: {请输入主题} -> \{请输入主题\}
+	 */
+	private String escapeChineseTemplateExpressions(String template) {
+		if (StringUtils.isBlank(template)) {
+			return template;
+		}
+		// Escape <...> content containing non-ASCII characters
+		template = template.replaceAll("<([^>]*[^\\x00-\\x7F][^>]*)>", "\\\\<$1>");
+		// Escape {...} content containing non-ASCII characters
+		template = template.replaceAll("\\{([^}]*[^\\x00-\\x7F][^}]*)\\}", "\\\\{$1\\\\}");
+		return template;
+	}
+
+	/**
+	 * Remove template expressions referencing non-existent variables to avoid StringTemplate errors.
+	 * Example: ${fdsa} (when map has no fdsa key) -> removed
+	 */
+	private String removeMissingVariableExpressions(String template, Map<String, Object> map) {
+		if (StringUtils.isBlank(template) || map == null) {
+			return template;
+		}
+		// Remove non-existent ${varName} references
+		template = removeMissingVariables(template, map, "\\$\\{([^}]+)\\}", 1);
+		// Remove non-existent $varName references
+		template = removeMissingVariables(template, map, "\\$([a-zA-Z_][a-zA-Z0-9_]*)", 1);
+		return template;
+	}
+
+	private String removeMissingVariables(String template, Map<String, Object> map, String regex, int groupIndex) {
+		java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(regex);
+		java.util.regex.Matcher matcher = pattern.matcher(template);
+		StringBuilder sb = new StringBuilder();
+		while (matcher.find()) {
+			String varName = matcher.group(groupIndex);
+			if (!map.containsKey(varName)) {
+				matcher.appendReplacement(sb, "");
+			}
+		}
+		matcher.appendTail(sb);
+		return sb.toString();
+	}
+
+
 
 	/**
 	 * Builds a multimodal message from content
@@ -424,7 +521,7 @@ public class BasicAgentExecutor extends AbstractAgentExecutor {
 						if (StringUtils.isNotBlank(item.getUrl())) {
 							String contentType = FileUtils.getContentType(item.getUrl());
 							MediaType mediaType = MediaType.parseMediaType(contentType);
-							media.add(Media.builder().mimeType(mediaType).data(new URL(item.getUrl())).build());
+                            media.add(Media.builder().mimeType(mediaType).data(new URL(item.getUrl())).build());
 						}
 						else if (StringUtils.isNotBlank(item.getPath())) {
 							String contentType = FileUtils.getContentType(item.getPath());
@@ -441,7 +538,10 @@ public class BasicAgentExecutor extends AbstractAgentExecutor {
 
 							String mimeType = item.getData().substring(0, semicolonIndex);
 							MediaType mediaType = MediaType.parseMediaType(mimeType);
-							media.add(new Media(mediaType, new ByteArrayResource(item.getData().getBytes())));
+							// Extract base64 data and decode to byte[]
+							String base64Data = item.getData().substring(semicolonIndex + 8); // skip ";base64,"
+							byte[] data = Base64.getDecoder().decode(base64Data);
+							media.add(Media.builder().mimeType(mediaType).data(data).build());
 						}
 						else {
 							throw new BizException(ErrorCode.INVALID_PARAMS.toError("content",
@@ -451,11 +551,13 @@ public class BasicAgentExecutor extends AbstractAgentExecutor {
 				}
 			}
 		}
-		catch (MalformedURLException e) {
+		catch (IOException e) {
 			throw new RuntimeException(e);
-		}
+		} catch (Exception e) {
+            throw new RuntimeException(e);
+        }
 
-		return UserMessage.builder().text(text).media(media).build();
+        return UserMessage.builder().text(text).media(media).build();
 	}
 
 	/**
@@ -534,23 +636,24 @@ public class BasicAgentExecutor extends AbstractAgentExecutor {
 
 		Map<String, AgentToolCallback> toolCallbackMap = getAgentToolCallback(toolCallbackProvider);
 
-		return toolCalls.stream().map(toolCall -> {
-			AgentToolCallback toolCallback = toolCallbackMap.get(toolCall.name());
-			ToolCallType type = ToolCallType.FUNCTION;
-			String arguments = toolCall.arguments();
-			if (toolCallback != null) {
-				type = toolCallback.getToolCallType();
-				Map<String, Object> argumentsMap = ToolArgumentsHelper.mergeToolArguments(toolCall.arguments(),
-						toolCallbackProvider.getExtraParams(), toolCallback.getId());
-				arguments = JsonUtils.toJson(argumentsMap);
-			}
+		return toolCalls.stream().filter(toolCall -> StringUtils.isNotBlank(toolCall.name()))
+			.map(toolCall -> {
+				AgentToolCallback toolCallback = toolCallbackMap.get(toolCall.name());
+				ToolCallType type = ToolCallType.FUNCTION;
+				String arguments = toolCall.arguments();
+				if (toolCallback != null) {
+					type = toolCallback.getToolCallType();
+					Map<String, Object> argumentsMap = ToolArgumentsHelper.mergeToolArguments(toolCall.arguments(),
+							toolCallbackProvider.getExtraParams(), toolCallback.getId());
+					arguments = JsonUtils.toJson(argumentsMap);
+				}
 
-			return ToolCall.builder()
-				.id(toolCall.id())
-				.type(type)
-				.function(ToolCall.Function.builder().name(toolCall.name()).arguments(arguments).build())
-				.build();
-		}).collect(Collectors.toCollection(ArrayList::new));
+				return ToolCall.builder()
+					.id(toolCall.id())
+					.type(type)
+					.function(ToolCall.Function.builder().name(toolCall.name()).arguments(arguments).build())
+					.build();
+			}).collect(Collectors.toCollection(ArrayList::new));
 	}
 
 	/**
@@ -606,6 +709,10 @@ public class BasicAgentExecutor extends AbstractAgentExecutor {
 		if (conversationHistory
 			.get(conversationHistory.size() - 1) instanceof ToolResponseMessage toolResponseMessage) {
 			toolResponseMessage.getResponses().forEach(response -> {
+				if (StringUtils.isBlank(response.name())) {
+					log.warn("Skipping tool result with null or empty name, response: {}", response.responseData());
+					return;
+				}
 				// Map tool type to tool result type
 				AgentToolCallback toolCallback = toolCallbackMap.get(response.name());
 				ToolCallType type = toolCallback == null ? ToolCallType.TOOL_RESULT : toolCallback.getToolCallType();
@@ -725,5 +832,94 @@ public class BasicAgentExecutor extends AbstractAgentExecutor {
 
 		return agentToolCallbackMap;
 	}
+
+    /**
+     * Build SkillComponents, containing SkillPromptAugmentAdvisor and read_skill ToolCallback.
+     * First explicitly create SkillRegistry, then share it between advisor and ReadSkillTool to ensure both use the same instance.
+     *
+     * @param skillsDirectory   skills directory
+     * @param targetSkillName   specify to only load skill with this name (optional), null means load all
+     */
+    private SkillComponents buildSkillComponents(String skillsDirectory, String targetSkillName) {
+        // 1. Explicitly create SkillRegistry, load skills from specified directory
+        SkillRegistry skillRegistry = FileSystemSkillRegistry.builder()
+                .projectSkillsDirectory(skillsDirectory)
+                .build();
+
+        // 2. If skillName is specified, only enable that skill, disable others
+        if (targetSkillName != null && !targetSkillName.isBlank()) {
+            for (SkillMetadata skill : skillRegistry.listAll()) {
+                if (!skill.getName().equals(targetSkillName)) {
+                    skillRegistry.disable(skill.getName());
+                }
+            }
+            log.info(">>> Filtered, only enabled skill: {}", targetSkillName);
+        }
+
+        // 3. Inject same SkillRegistry into advisor for injecting Skill summaries into System Prompt
+        SkillPromptAugmentAdvisor advisor = SkillPromptAugmentAdvisor.builder()
+                .skillRegistry(skillRegistry)
+                .build();
+
+        // 4. Use same SkillRegistry to create read_skill tool so LLM can read the same skills
+        ToolCallback rawReadSkillTool = ReadSkillTool.createReadSkillToolCallback(skillRegistry, null);
+        ToolCallback readSkillTool = new LoggingToolCallbackWrapper(rawReadSkillTool);
+
+        return new SkillComponents(advisor, readSkillTool);
+    }
+
+    /**
+     * Encapsulate Skill related components: advisor for injecting Skill summaries into System Prompt,
+     * readSkillToolCallback for LLM to read full Skill content on demand.
+     */
+    static class SkillComponents {
+
+        final SkillPromptAugmentAdvisor advisor;
+
+        final ToolCallback readSkillToolCallback;
+
+        SkillComponents(SkillPromptAugmentAdvisor advisor, ToolCallback readSkillToolCallback) {
+            this.advisor = advisor;
+            this.readSkillToolCallback = readSkillToolCallback;
+        }
+    }
+
+    /**
+     * Wrapper for ToolCallback that prints clear logs before and after calls.
+     * When running tests search for "🔧" in console to quickly locate read_skill calls.
+     */
+    static class LoggingToolCallbackWrapper implements ToolCallback {
+
+        private final ToolCallback delegate;
+
+        LoggingToolCallbackWrapper(ToolCallback delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public ToolDefinition getToolDefinition() {
+            return delegate.getToolDefinition();
+        }
+
+        @Override
+        public String call(String toolInput) {
+            log.info("🔧🔧🔧 read_skill called! Input: {}", toolInput);
+            String result = delegate.call(toolInput);
+            String preview = result.length() > 200 ? result.substring(0, 200) + "..." : result;
+            log.info("🔧🔧🔧 read_skill returned (first 200 chars): {}", preview);
+            log.info("🔧🔧🔧 Total returned length: {} chars", result.length());
+            return result;
+        }
+
+        @Override
+        public String call(String toolInput, ToolContext toolContext) {
+            log.info("🔧🔧🔧 read_skill called! Input: {}", toolInput);
+            String result = delegate.call(toolInput, toolContext);
+            String preview = result.length() > 200 ? result.substring(0, 200) + "..." : result;
+            log.info("🔧🔧🔧 read_skill returned (first 200 chars): {}", preview);
+            log.info("🔧🔧🔧 Total returned length: {} chars", result.length());
+            return result;
+        }
+    }
 
 }

@@ -16,6 +16,10 @@
 
 package com.alibaba.cloud.ai.studio.core.agent.tool;
 
+import com.alibaba.cloud.ai.graph.agent.extension.tools.filesystem.FileSystemTools;
+import com.alibaba.cloud.ai.graph.agent.tools.GlobSearchTool;
+import com.alibaba.cloud.ai.graph.agent.tools.GrepSearchTool;
+import com.alibaba.cloud.ai.graph.agent.tools.ShellTool2;
 import com.alibaba.cloud.ai.studio.runtime.enums.AppComponentTypeEnum;
 import com.alibaba.cloud.ai.studio.runtime.domain.app.AgentConfig;
 import com.alibaba.cloud.ai.studio.runtime.domain.mcp.McpQuery;
@@ -32,6 +36,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ArrayUtils;
 import org.jetbrains.annotations.NotNull;
+import org.springframework.ai.support.ToolCallbacks;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.ai.tool.support.ToolUtils;
@@ -111,6 +116,50 @@ public class CompositeToolCallbackProvider implements ToolCallbackProvider {
 			addToolCallbacks(toolCallbacks, workflowComponentCallbacks);
 		}
 
+		// add shell tool callback
+		ShellTool2 shellTool2 = ShellTool2.builder(agentConfig.getFileWorkspace()).build();
+		ToolCallback shellRawCallback = ToolCallbacks.from(shellTool2)[0];
+		AgentToolCallback shellCallback = new AgentToolCallbackAdapter(shellRawCallback,
+				shellRawCallback.getToolDefinition().name()) {
+			@Override
+			public String call(String functionInput,
+					org.springframework.ai.chat.model.ToolContext toolContext) {
+				com.alibaba.cloud.ai.graph.RunnableConfig config = null;
+				if (toolContext != null && toolContext.getContext() != null) {
+					config = (com.alibaba.cloud.ai.graph.RunnableConfig) toolContext.getContext()
+							.get(com.alibaba.cloud.ai.graph.agent.tools.ToolContextConstants.AGENT_CONFIG_CONTEXT_KEY);
+				}
+				if (config == null) {
+					config = com.alibaba.cloud.ai.graph.RunnableConfig.builder().build();
+					shellTool2.getSessionManager().initialize(config);
+				}
+				java.util.Map<String, Object> newContext = new java.util.HashMap<>();
+				if (toolContext != null && toolContext.getContext() != null) {
+					newContext.putAll(toolContext.getContext());
+				}
+				newContext.put(com.alibaba.cloud.ai.graph.agent.tools.ToolContextConstants.AGENT_CONFIG_CONTEXT_KEY,
+						config);
+				return super.call(functionInput, new org.springframework.ai.chat.model.ToolContext(newContext));
+			}
+		};
+		addToolCallbacks(toolCallbacks, List.of(shellCallback));
+
+		// add file system tools
+		FileSystemTools fileTools = FileSystemTools.builder()
+			.rootDir(agentConfig.getFileWorkspace())
+			.virtualMode(true)
+			.maxFileSizeMb(10)
+			.build();
+		addToolCallbacks(toolCallbacks, toAgentToolCallbacks(ToolCallbacks.from(fileTools)));
+		addToolCallbacks(toolCallbacks, List.of(PythonTool.createPythonToolCallbackAgent(PythonTool.DESCRIPTION)));
+		addToolCallbacks(toolCallbacks, List.of(SystemTimeTool.createCallbackAgent()));
+		addToolCallbacks(toolCallbacks,
+				List.of(AgentToolCallbackAdapter.createCallback(
+						GlobSearchTool.builder(agentConfig.getFileWorkspace()).build(), "glob_search_tool")));
+		addToolCallbacks(toolCallbacks,
+				List.of(AgentToolCallbackAdapter.createCallback(
+						GrepSearchTool.builder(agentConfig.getFileWorkspace()).build(), "grep_search_tool")));
+
 		return toolCallbacks.toArray(new ToolCallback[0]);
 	}
 
@@ -149,7 +198,8 @@ public class CompositeToolCallbackProvider implements ToolCallbackProvider {
 	/**
 	 * Adds new tool callbacks to the list, skipping any duplicates.
 	 */
-	private void addToolCallbacks(List<ToolCallback> toolCallbacks, List<ToolCallback> newToolCallbacks) {
+	private void addToolCallbacks(List<ToolCallback> toolCallbacks,
+			List<? extends ToolCallback> newToolCallbacks) {
 		Set<String> existingNames = toolCallbacks.stream()
 			.map(callback -> callback.getToolDefinition().name())
 			.collect(Collectors.toSet());
@@ -163,6 +213,20 @@ public class CompositeToolCallbackProvider implements ToolCallbackProvider {
 			existingNames.add(toolName);
 			return true;
 		}).forEach(toolCallbacks::add);
+	}
+
+	/**
+	 * Converts an array of ToolCallback to a list of AgentToolCallback using the adapter.
+	 * @param toolCallbacks the tool callbacks to convert
+	 * @return list of AgentToolCallback
+	 */
+	private List<AgentToolCallback> toAgentToolCallbacks(ToolCallback[] toolCallbacks) {
+		if (ArrayUtils.isEmpty(toolCallbacks)) {
+			return List.of();
+		}
+		return Arrays.stream(toolCallbacks)
+			.map(tc -> AgentToolCallbackAdapter.createCallback(tc, tc.getToolDefinition().name()))
+			.collect(Collectors.toList());
 	}
 
 	/**

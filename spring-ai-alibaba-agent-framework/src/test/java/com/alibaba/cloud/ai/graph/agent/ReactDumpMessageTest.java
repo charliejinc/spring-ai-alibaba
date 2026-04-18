@@ -27,6 +27,7 @@ import com.alibaba.cloud.ai.graph.agent.hook.messages.AgentCommand;
 import com.alibaba.cloud.ai.graph.agent.hook.messages.MessagesModelHook;
 import com.alibaba.cloud.ai.graph.agent.hook.skills.ReadSkillTool;
 import com.alibaba.cloud.ai.graph.checkpoint.savers.MemorySaver;
+import com.alibaba.cloud.ai.graph.skills.SkillMetadata;
 import com.alibaba.cloud.ai.graph.skills.registry.SkillRegistry;
 import com.alibaba.cloud.ai.graph.skills.registry.filesystem.FileSystemSkillRegistry;
 import org.junit.jupiter.api.BeforeEach;
@@ -39,6 +40,7 @@ import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.ToolDefinition;
 
+import java.io.File;
 import java.util.List;
 import java.util.Optional;
 
@@ -157,9 +159,21 @@ public class ReactDumpMessageTest {
 
     @Test
     void testChatClientStreamWithReadSkill() throws Exception {
+        // 可指定技能名称，为 null 则加载全部 skills
+        testChatClientStreamWithSkillName(null);
+    }
+
+    @Test
+    void testChatClientStreamWithSingleSkill() throws Exception {
+        // 指定单个技能名称，只加载并使用该技能
+        testChatClientStreamWithSkillName("read_skill");
+    }
+
+    void testChatClientStreamWithSkillName(String targetSkillName) throws Exception {
         // 1. 构建 SkillComponents（advisor + readSkillToolCallback）
-        String skillsDir = getClass().getClassLoader().getResource("skills").getFile();
-        SkillComponents skillComponents = buildSkillComponents(skillsDir);
+        //String skillsDir = getClass().getClassLoader().getResource("skills").getFile();
+        String skillsDir = System.getProperty("user.home") + File.separator + ".lx-agent" + File.separator + "skills";
+        SkillComponents skillComponents = buildSkillComponents(skillsDir, targetSkillName);
 
         System.out.println("=== 已加载 " + skillComponents.advisor.getSkillCount() + " 个 Skills ===");
         skillComponents.advisor.listSkills().forEach(skill ->
@@ -216,19 +230,32 @@ public class ReactDumpMessageTest {
     /**
      * 构建 SkillComponents，包含 SkillPromptAugmentAdvisor 和 read_skill ToolCallback。
      * 先显式创建 SkillRegistry，再共享给 advisor 和 ReadSkillTool，确保两者使用同一实例。
+     *
+     * @param skillsDirectory   skills 所在目录
+     * @param targetSkillName   指定只加载该名称的 skill（可选），为 null 则加载全部
      */
-    private SkillComponents buildSkillComponents(String skillsDirectory) {
+    private SkillComponents buildSkillComponents(String skillsDirectory, String targetSkillName) {
         // 1. 显式创建 SkillRegistry，加载指定目录下的 skills
         SkillRegistry skillRegistry = FileSystemSkillRegistry.builder()
                 .projectSkillsDirectory(skillsDirectory)
                 .build();
 
-        // 2. 将同一个 SkillRegistry 注入 advisor，用于注入 Skill 摘要到 System Prompt
+        // 2. 如果指定了 skillName，只启用该 skill，其余禁用
+        if (targetSkillName != null && !targetSkillName.isBlank()) {
+            for (SkillMetadata skill : skillRegistry.listAll()) {
+                if (!skill.getName().equals(targetSkillName)) {
+                    skillRegistry.disable(skill.getName());
+                }
+            }
+            System.out.println(">>> 已过滤，仅启用 skill: " + targetSkillName);
+        }
+
+        // 3. 将同一个 SkillRegistry 注入 advisor，用于注入 Skill 摘要到 System Prompt
         SkillPromptAugmentAdvisor advisor = SkillPromptAugmentAdvisor.builder()
                 .skillRegistry(skillRegistry)
                 .build();
 
-        // 3. 用同一个 SkillRegistry 创建 read_skill 工具，确保 LLM 能读取到相同的 skills
+        // 4. 用同一个 SkillRegistry 创建 read_skill 工具，确保 LLM 能读取到相同的 skills
         ToolCallback rawReadSkillTool = ReadSkillTool.createReadSkillToolCallback(skillRegistry, null);
         ToolCallback readSkillTool = new LoggingToolCallbackWrapper(rawReadSkillTool);
 

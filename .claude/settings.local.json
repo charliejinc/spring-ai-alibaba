@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./mvnw -pl :spring-ai-alibaba-studio spring-boot:run -DskipTests)",
+      "Bash(./mvnw -pl :spring-ai-alibaba-studio test -Dtest=StudioApplication -DfailIfNoTests=false)",
+      "Bash(./mvnw -pl :spring-ai-alibaba-studio spring-boot:run -DskipTests -Dspring-boot.run.mainClass=com.alibaba.cloud.ai.StudioApplication)",
+      "Bash(export AI_DASHSCOPE_API_KEY=$AI_DASHSCOPE_API_KEY:-)",
+      "Bash(./mvnw -pl :spring-ai-alibaba-examples-chatbot spring-boot:run -DskipTests)",
+      "Bash(./mvnw -pl examples/chatbot spring-boot:run -DskipTests)",
+      "Bash(export AI_DASHSCOPE_API_KEY=$AI_DASHSCOPE_API_KEY:-sk-test)",
+      "Bash(../mvnw spring-boot:run -DskipTests)",
+      "Bash(AI_DASHSCOPE_API_KEY=sk-6cfc8350dc524796a5c7846eb87c4d35 \"D:/code2/spring-ai-alibaba/mvnw\" spring-boot:run -DskipTests)",
+      "Bash(netstat -ano)",
+      "Bash(findstr \":8080\")",
+      "Bash(AI_DASHSCOPE_API_KEY=sk-6cfc8350dc524796a5c7846eb87c4d35 \"D:/code2/spring-ai-alibaba/mvnw\" clean spring-boot:run -DskipTests)",
+      "Bash(pnpm install:*)",
+      "Bash(npm run:*)",
+      "Bash(findstr LISTENING)",
+      "Bash(taskkill:*)",
+      "Bash(curl -s \"http://localhost:8080/apps/research_agent/users/user-001/threads\")",
+      "Bash(findstr \":3000\")",
+      "Bash(curl:*)",
+      "Bash(ipconfig:*)",
+      "Bash(AI_DASHSCOPE_API_KEY=sk-6cfc8350dc524796a5c7846eb87c4d35 ./mvnw -pl :spring-ai-alibaba-examples-chatbot -B spring-boot:run)",
+      "Bash(AI_DASHSCOPE_API_KEY=sk-6cfc8350dc524796a5c7846eb87c4d35 ./mvnw -pl :chatbot -B spring-boot:run)",
+      "Bash(AI_DASHSCOPE_API_KEY=sk-6cfc8350dc524796a5c7846eb87c4d35 ../../mvnw spring-boot:run)",
+      "Bash(tasklist /fi \"PID eq 16836\")",
+      "Bash(wmic process:*)"
+    ]
+  }
+}

@@ -46,14 +46,14 @@
             <organizationUrl>https://aliyun.com</organizationUrl>
         </developer>
     </developers>
-
     <modules>
         <module>spring-ai-alibaba-bom</module>
         <module>spring-ai-alibaba-graph-core</module>
         <module>spring-ai-alibaba-agent-framework</module>
         <module>spring-ai-alibaba-studio</module>
         <module>spring-ai-alibaba-sandbox</module>
-
+        <module>spring-ai-alibaba-admin</module>
+        <module>examples/multimodal</module>
         <!-- Spring AI Alibaba Spring Boot Starters -->
         <module>spring-boot-starters/spring-ai-alibaba-starter-a2a-nacos</module>
         <module>spring-boot-starters/spring-ai-alibaba-starter-config-nacos</module>
@@ -75,11 +75,16 @@
         <system>Github Actions</system>
         <url>https://github.com/alibaba/spring-ai-alibaba/actions</url>
     </ciManagement>
-
     <distributionManagement>
+        <repository>
+            <id>releases</id>
+            <name>releases</name>
+            <url>http://maven.shangjinuu.com:8081/nexus/content/repositories/releases/</url>
+        </repository>
         <snapshotRepository>
             <id>snapshots</id>
-            <url>http://mvnrepo.alibaba-inc.com/mvn/snapshots</url>
+            <name>snapshots</name>
+            <url>http://maven.shangjinuu.com:8081/nexus/content/repositories/snapshots/</url>
         </snapshotRepository>
     </distributionManagement>
 
@@ -573,7 +578,6 @@
         <profile>
             <id>release</id>
 
-            <distributionManagement></distributionManagement>
             <build>
                 <plugins>
                     <plugin>

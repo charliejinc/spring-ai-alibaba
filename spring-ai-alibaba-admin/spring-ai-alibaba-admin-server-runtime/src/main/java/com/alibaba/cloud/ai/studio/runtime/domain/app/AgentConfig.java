@@ -76,6 +76,14 @@ public class AgentConfig implements AppConfig, Serializable {
 	/** Initial context and suggested questions */
 	private Prologue prologue;
 
+	/** File workspace for agent */
+	private String fileWorkspace;
+
+	public AgentConfig() {
+		this.fileWorkspace = System.getProperty("user.home") + java.io.File.separator + ".spring-ai-alibaba"
+				+ java.io.File.separator;
+	}
+
 	/** Configuration for model generation parameters */
 	@Data
 	public static class Parameter implements Serializable {

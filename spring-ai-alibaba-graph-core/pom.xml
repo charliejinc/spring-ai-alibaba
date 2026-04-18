@@ -36,6 +36,18 @@
         <developerConnection>git@github.com:alibaba/spring-ai-alibaba.git</developerConnection>
         <url>https://github.com/alibaba/spring-ai-alibaba</url>
     </scm>
+    <distributionManagement>
+        <repository>
+            <id>releases</id>
+            <name>releases</name>
+            <url>http://maven.shangjinuu.com:8081/nexus/content/repositories/releases/</url>
+        </repository>
+        <snapshotRepository>
+            <id>snapshots</id>
+            <name>snapshots</name>
+            <url>http://maven.shangjinuu.com:8081/nexus/content/repositories/snapshots/</url>
+        </snapshotRepository>
+    </distributionManagement>
 
     <properties>
         <testcontainers.version>1.19.3</testcontainers.version>
@@ -43,7 +55,6 @@
         <jackson.version>2.18.4</jackson.version>
         <jetbrains-annotations.version>13.0</jetbrains-annotations.version>
     </properties>
-
     <dependencies>
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
